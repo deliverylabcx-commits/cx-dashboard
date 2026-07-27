@@ -395,7 +395,19 @@ function render(data){
 
   // 30분 이상 지연 WoW (Total 기준, 감소가 개선이므로 색상 반대로 적용)
   const delayWow = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
-  const delayDelta = (delayWow!=null && delayWow>0) ? ((delayToday-delayWow)/delayWow) : null;
+  let delayDelta = null;
+  let delayDeltaText = "전주 데이터 없음";
+  let delayDeltaClass = "";
+  if (delayWow != null){
+    if (delayWow === 0){
+      if (delayToday === 0){ delayDelta = 0; delayDeltaText = "전주 대비 변화 없음 (0건)"; delayDeltaClass = "up"; }
+      else { delayDelta = null; delayDeltaText = `전주 0건 → 금주 ${fmtNum(delayToday)}건`; delayDeltaClass = "down"; }
+    } else {
+      delayDelta = (delayToday-delayWow)/delayWow;
+      delayDeltaText = (delayDelta<=0?"▼ ":"▲ ")+Math.abs(Math.round(delayDelta*100))+"% (전주 동요일 대비)";
+      delayDeltaClass = delayDelta<=0 ? "up" : "down";
+    }
+  }
 
   // 아웃콜 카테고리별 WoW 완료율
   function catRateAt(cat, date){
@@ -409,7 +421,7 @@ function render(data){
     return { category:c, todayRate, wowRate, delta };
   });
 
-  // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위 집계)
+  // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위, 카테고리별 집계)
   function weekKeyOf(md){
     const [m,d] = md.split("/").map(Number);
     const dt = new Date(DATA_YEAR, m-1, d);
@@ -418,18 +430,19 @@ function render(data){
     const monday = new Date(dt); monday.setDate(dt.getDate()+diffToMonday);
     return `${monday.getMonth()+1}/${monday.getDate()}`;
   }
-  const weeklyOutcall = {};
+  const weeklyByCategory = {}; // category -> weekKey -> {inbound, completed}
+  (outcall.categories||[]).forEach(c => { weeklyByCategory[c] = {}; });
   (outcall.dates||[]).forEach(d => {
     const wk = weekKeyOf(d);
-    weeklyOutcall[wk] = weeklyOutcall[wk] || { inbound:0, completed:0 };
-    Object.values(outcall.data).forEach(entities => {
-      const t = entities["Total"];
+    (outcall.categories||[]).forEach(c => {
+      weeklyByCategory[c][wk] = weeklyByCategory[c][wk] || { inbound:0, completed:0 };
+      const t = outcall.data[c]?.["Total"];
       if (!t) return;
-      weeklyOutcall[wk].inbound += t["인입"]?.[d] || 0;
-      weeklyOutcall[wk].completed += t["통화완료"]?.[d] || 0;
+      weeklyByCategory[c][wk].inbound += t["인입"]?.[d] || 0;
+      weeklyByCategory[c][wk].completed += t["통화완료"]?.[d] || 0;
     });
   });
-  const weekKeys = Object.keys(weeklyOutcall).sort((a,b) => {
+  const allWeekKeys = [...new Set((outcall.dates||[]).map(weekKeyOf))].sort((a,b) => {
     const [am,ad] = a.split("/").map(Number), [bm,bd] = b.split("/").map(Number);
     return (am*100+ad) - (bm*100+bd);
   });
@@ -446,10 +459,18 @@ function render(data){
   // 인사이트 카드 자동 생성
   const insights = [];
   {
-    const rateEntries = agents.map(a => [a, sections["상담완료율_%"]?.[a]?.[today]]).filter(([,v]) => v!=null);
+    const rateEntries = agents
+      .filter(a => {
+        const workStatus = schedule?.schedule?.[a]?.[today];
+        const isOff = workStatus && OFF_STATUSES.includes(workStatus);
+        const hasInbound = (sections["상담인입"]?.[a]?.[today] || 0) > 0;
+        return !isOff && hasInbound;
+      })
+      .map(a => [a, sections["상담완료율_%"]?.[a]?.[today]])
+      .filter(([,v]) => v!=null);
     if (rateEntries.length){
       const best = rateEntries.reduce((a,b) => b[1]>a[1] ? b : a);
-      insights.push(`오늘 완료율 최고 상담원은 <b>${best[0]}</b> (${fmtPct(best[1])})입니다.`);
+      insights.push(`오늘 완료율 최고 상담원은 <b>${best[0]}</b> (${fmtPct(best[1])})입니다. (근무 중 · 인입 있는 상담원 기준)`);
     }
     const delayByAgent = {};
     delay30.filter(r => r.date === today).forEach(r => { delayByAgent[r.agent] = (delayByAgent[r.agent]||0)+1; });
@@ -510,7 +531,7 @@ function render(data){
       <div class="kpi"><div class="label">완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta">평균 처리율 ${fmtPct(avgProcessToday)}</div></div>
       <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
-        <div class="delta ${delayDelta==null?'':(delayDelta<=0?'up':'down')}">${delayDelta!=null ? (delayDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(delayDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+        <div class="delta ${delayDeltaClass}">${delayDeltaText}</div></div>
       <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
         <div class="delta ${outcallDelta==null?'':(outcallDelta>=0?'up':'down')}">${outcallDelta!=null ? (outcallDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(outcallDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">평균 담당자별 인입</div><div class="val">${avgPerAgentToday!=null?avgPerAgentToday.toFixed(1):'-'}</div>
@@ -574,7 +595,7 @@ function render(data){
 
     <div class="grid2">
       <div class="card">
-        <h2>아웃콜 주별 트래킹 <span class="tag">전체 합산</span></h2>
+        <h2>아웃콜 주별 트래킹 <span class="tag">카테고리별 인입 추이</span></h2>
         <canvas id="chartOutcallWeekly"></canvas>
       </div>
       <div class="card">
@@ -648,7 +669,7 @@ function render(data){
 
   document.getElementById("refreshBtn").onclick = () => refresh(true);
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys, weeklyOutcall });
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory });
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold };
@@ -661,7 +682,7 @@ function destroyCharts(){
   charts = {};
 }
 
-function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyOutcall }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
@@ -797,17 +818,24 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyO
   }
 
   const weeklyCanvas = document.getElementById("chartOutcallWeekly");
-  if (weeklyCanvas && weekKeys?.length){
+  if (weeklyCanvas && weekKeys?.length && weeklyByCategory){
+    const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC"];
+    const cats = Object.keys(weeklyByCategory);
     charts.outcallWeekly = new Chart(weeklyCanvas, {
+      type: "line",
       data: {
         labels: weekKeys.map(w => `${w} 주`),
-        datasets: [
-          { type:"bar", label:"인입", data: weekKeys.map(w => weeklyOutcall[w].inbound), backgroundColor:"#4C6EF588", borderRadius:4, order:2 },
-          { type:"line", label:"통화완료", data: weekKeys.map(w => weeklyOutcall[w].completed), borderColor:"#12B886", tension:.3, pointRadius:3, order:1 }
-        ]
+        datasets: cats.map((c,i) => ({
+          label: c,
+          data: weekKeys.map(w => weeklyByCategory[c][w]?.inbound ?? 0),
+          borderColor: palette[i % palette.length],
+          backgroundColor: palette[i % palette.length],
+          tension: .3,
+          pointRadius: 3
+        }))
       },
       options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}} } }
+        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"인입 건수",font:{size:10}} } } }
     });
   }
 
