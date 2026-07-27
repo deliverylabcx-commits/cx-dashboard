@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CX 생산성 · CS/아웃콜 트래킹 대시보드</title>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0F1729; --panel:#16213A; --panel-2:#1C2A47;
+    --ink:#E8ECF4; --ink-dim:#8B96AD; --line:#28324D;
+    --accent:#E8A33D; --good:#2FBF8F; --bad:#F0555B;
+    --c-punisher:#4C6EF5; --c-maru:#12B886; --c-zenze:#F76707;
+    --c-tsuna:#BE4BDB; --c-hugo:#FA5252; --c-carol:#748FFC;
+    font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);}
+  .wrap{max-width:1320px;margin:0 auto;padding:28px 20px 60px;}
+  header{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;margin-bottom:24px;}
+  h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-0.02em;}
+  .sub{color:var(--ink-dim);font-size:13px;margin-top:4px;}
+  .status{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink-dim);flex-wrap:wrap;}
+  input[type="date"]{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;font-family:inherit;color-scheme:dark;}
+  .badge{padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;}
+  .badge-good{background:#123A2E;color:var(--good);}
+  .badge-bad{background:#3A1A1C;color:var(--bad);}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);animation:pulse 2s infinite;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  button{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;}
+  button:hover{border-color:var(--accent);}
+  .banner{background:#3A2A14;border:1px solid #6B4A1E;color:#F2C57C;padding:10px 14px;border-radius:8px;font-size:12.5px;margin-bottom:18px;line-height:1.6;}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:22px;}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;}
+  .kpi .label{font-size:12px;color:var(--ink-dim);margin-bottom:8px;}
+  .kpi .val{font-size:26px;font-weight:700;letter-spacing:-0.02em;}
+  .kpi .delta{font-size:12px;margin-top:6px;}
+  .delta.up{color:var(--good);} .delta.down{color:var(--bad);}
+  .grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;margin-bottom:16px;}
+  .grid1{display:grid;grid-template-columns:1fr;gap:16px;margin-bottom:16px;}
+  @media(max-width:900px){.grid2{grid-template-columns:1fr;}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;}
+  .card h2{font-size:14px;margin:0 0 14px;font-weight:600;color:var(--ink);}
+  .card h2 .tag{font-size:11px;color:var(--ink-dim);font-weight:400;margin-left:6px;}
+  canvas{max-height:280px;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line);}
+  th:first-child,td:first-child{text-align:left;color:var(--ink-dim);}
+  th{color:var(--ink-dim);font-weight:500;font-size:12px;}
+  .tabs{display:flex;gap:6px;margin-bottom:12px;}
+  .tab{padding:5px 10px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--ink-dim);border:1px solid transparent;}
+  .tab.active{background:var(--panel-2);color:var(--ink);border-color:var(--line);}
+  .footer-note{color:var(--ink-dim);font-size:11.5px;margin-top:30px;line-height:1.7;}
+  .loading{padding:60px;text-align:center;color:var(--ink-dim);}
+  .acc-item{border:1px solid var(--line);border-radius:10px;margin-bottom:8px;overflow:hidden;}
+  .acc-header{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;user-select:none;transition:background .15s;}
+  .acc-header:hover{background:var(--panel-2);}
+  .acc-header.active{background:var(--panel-2);}
+  .acc-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+  .acc-name{font-weight:600;font-size:13.5px;min-width:80px;}
+  .acc-summary{color:var(--ink-dim);font-size:12px;flex:1;}
+  .acc-chev{color:var(--ink-dim);font-size:12px;transition:transform .15s;}
+  .acc-header.active .acc-chev{transform:rotate(180deg);}
+  .acc-body{display:none;padding:16px;border-top:1px solid var(--line);background:#121C33;}
+  .acc-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px;}
+  .acc-kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}
+  .acc-kpi .l{font-size:11px;color:var(--ink-dim);margin-bottom:4px;}
+  .acc-kpi .v{font-size:17px;font-weight:700;}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="loading" id="loading">데이터를 불러오는 중입니다…</div>
+</div>
+
+<script>
+/* ===================== 설정 ===================== */
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?output=csv";
+const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTjti7FdTYQVky3fer7jhzdfQxh5AXJeFWNi-Nt6WkomVsBRbf-NsheB4KLnJ1EpYY97an7--YqNn7I/pub?gid=0&single=true&output=csv";
+const OUTCALL_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=25550252&single=true&output=csv";
+const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1307884512&single=true&output=csv";
+const DELAYHOLD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=634573420&single=true&output=csv";
+const SCHEDULE_NAME_MAP = { Sense: "Zenze", Maru: "maru" }; // 스케줄 시트 표기 → CS_Tracking 표기로 정규화
+const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무"]; // 근무 아닌 상태로 취급
+const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신
+const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
+const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)"];
+const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC" };
+const AGENT_ORDER = ["Punisher","maru","Zenze","Tsuna","Hugo","Carol"];
+
+let charts = {}; // keep instances to destroy on refresh
+let countdownTimer = null;
+let lastCtx = null; // { dates, sections, agents, today, yday } for accordion drill-down
+let agentDetailChart = null;
+let openAgentPanel = null;
+let selectedDateOverride = null; // 캘린더에서 사용자가 고른 날짜 (M/D). null이면 최신 활동일 사용
+let lastLoadedData = null; // 마지막으로 fetch한 원본 데이터 (재렌더용, refetch 없이)
+
+/* ===================== 파싱 ===================== */
+function parseCSV(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const header = rows[HEADER_ROW] || [];
+  const dateRe = /^\d{1,2}\/\d{1,2}$/;
+  const dateCols = [];
+  header.forEach((cell, idx) => {
+    const v = (cell || "").trim();
+    if (dateRe.test(v)) dateCols.push({ col: idx, date: v });
+  });
+
+  const sections = {};
+  let totalRow = null;
+  let currentSection = null;
+
+  for (let r = HEADER_ROW + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || row.length < 3) continue;
+    const col1 = (row[1] || "").trim();
+    const col2 = (row[2] || "").trim();
+
+    if (col1 === "Catagory" && col2 === "상담인입_Total"){
+      totalRow = {};
+      dateCols.forEach(({col,date}) => { totalRow[date] = toNum(row[col]); });
+      continue;
+    }
+    if (KNOWN_SECTIONS.includes(col1)) currentSection = col1;
+    if (!currentSection || !col2) continue;
+
+    sections[currentSection] = sections[currentSection] || {};
+    sections[currentSection][col2] = {};
+    dateCols.forEach(({col,date}) => { sections[currentSection][col2][date] = toNum(row[col]); });
+  }
+
+  return { dates: dateCols.map(d=>d.date), sections, totalRow };
+}
+
+function toNum(v){
+  v = (v||"").trim();
+  if (v === "" || v === "-") return null;
+  if (v.endsWith("%")) return parseFloat(v)/100;
+  const n = parseFloat(v);
+  return isNaN(n) ? null : n;
+}
+
+/* ===================== 스케줄 시트 파싱 ===================== */
+function parseSchedule(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const headerIdx = rows.findIndex(r => (r[1] || "").trim() === "Name");
+  if (headerIdx < 0) return { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} };
+
+  const header = rows[headerIdx];
+  const dateRe = /^\d{1,2}\/\d{1,2}$/;
+  const dateCols = [];
+  header.forEach((cell, idx) => {
+    const v = (cell || "").trim();
+    if (dateRe.test(v)) dateCols.push({ col: idx, date: v });
+  });
+
+  const schedule = {}, minStaff = {}, totalStaff = {}, issueStatus = {};
+  let expectIssueNext = false;
+
+  for (let r = headerIdx + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row) continue;
+    const label = (row[1] || "").trim();
+    if (label === "최소 근무인원"){
+      dateCols.forEach(({col,date}) => { minStaff[date] = toNum(row[col]); });
+      continue;
+    }
+    if (label === "총 근무인원"){
+      dateCols.forEach(({col,date}) => { totalStaff[date] = toNum(row[col]); });
+      expectIssueNext = true;
+      continue;
+    }
+    if (expectIssueNext){
+      dateCols.forEach(({col,date}) => { issueStatus[date] = (row[col]||"").trim(); });
+      break; // Lunch rotation 등 이후 섹션은 사용하지 않음
+    }
+    if (label){
+      const norm = SCHEDULE_NAME_MAP[label] || label;
+      schedule[norm] = {};
+      dateCols.forEach(({col,date}) => { schedule[norm][date] = (row[col]||"").trim(); });
+    }
+  }
+
+  return { dates: dateCols.map(d=>d.date), schedule, minStaff, totalStaff, issueStatus };
+}
+
+/* ===================== Out Call_Tracking 파싱 (카테고리 > Total/상담원 > 인입/통화완료/미처리) ===================== */
+function parseOutCall(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const headerIdx = rows.findIndex(r => (r[1] || "").trim() === "Catagory");
+  if (headerIdx < 0) return { dates: [], categories: [], data: {} };
+
+  const header = rows[headerIdx];
+  const dateRe = /^\d{1,2}\/\d{1,2}$/;
+  const dateCols = [];
+  header.forEach((cell, idx) => {
+    const v = (cell || "").trim();
+    if (dateRe.test(v)) dateCols.push({ col: idx, date: v });
+  });
+
+  const data = {};
+  const categories = [];
+  let currentCategory = null, currentEntity = null;
+
+  for (let r = headerIdx + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || row.length < 3) continue;
+    const col1 = (row[1] || "").trim();
+    const col2 = (row[2] || "").trim();
+    if (!col1 && !col2) continue;
+    if (col1){ currentCategory = col1; if (!categories.includes(col1)) categories.push(col1); }
+    if (!currentCategory || !col2) continue;
+
+    let metric;
+    if (col2.startsWith("ㄴ")){
+      metric = col2.replace("ㄴ", "").replace(/\(.+\)/, "").trim(); // 통화완료 / 통화완료_% / 미처리 / 미처리_%
+    } else {
+      currentEntity = col2; // Total 또는 상담원 이름
+      metric = "인입";
+    }
+    data[currentCategory] = data[currentCategory] || {};
+    data[currentCategory][currentEntity] = data[currentCategory][currentEntity] || {};
+    data[currentCategory][currentEntity][metric] = {};
+    dateCols.forEach(({col,date}) => { data[currentCategory][currentEntity][metric][date] = toNum(row[col]); });
+  }
+
+  return { dates: dateCols.map(d=>d.date), categories, data };
+}
+
+/* ===================== 지연 로우데이터 파싱 (30분 지연 체크 / 응대지연_보류 공용) ===================== */
+function parseDelayRows(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const headerIdx = rows.findIndex(r => (r[0] || "").trim() === "Date");
+  if (headerIdx < 0) return [];
+  const header = rows[headerIdx].map(h => (h||"").trim());
+  const idx = {
+    date: header.indexOf("Date"),
+    agent: header.indexOf("당당자") >= 0 ? header.indexOf("당당자") : header.indexOf("담당자"),
+    store: header.indexOf("사업장"),
+    tag: header.indexOf("태그"),
+    duration: header.indexOf("소요시간"),
+    url: header.indexOf("채널톡 Url"),
+    reason: header.indexOf("사유") >= 0 ? header.indexOf("사유") : header.indexOf("이슈"),
+  };
+  const dateRe = /^(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})$/;
+  const out = [];
+  for (let r = headerIdx + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row) continue;
+    const raw = (row[idx.date] || "").trim();
+    const m = raw.match(dateRe);
+    if (!m) continue;
+    out.push({
+      date: `${parseInt(m[2])}/${parseInt(m[3])}`,
+      agent: (row[idx.agent] || "").trim(),
+      store: (row[idx.store] || "").trim(),
+      tag: (row[idx.tag] || "").trim(),
+      duration: (row[idx.duration] || "").trim(),
+      url: (row[idx.url] || "").trim(),
+      reason: (row[idx.reason] || "").trim(),
+    });
+  }
+  return out;
+}
+
+/* ===================== 데이터 로드 ===================== */
+async function fetchCSV(url){
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("시트를 불러오지 못했습니다 (" + res.status + ")");
+  return res.text();
+}
+
+async function loadData(){
+  const csText = await fetchCSV(CSV_URL);
+  let schedule = { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} };
+  let outcall = { dates: [], categories: [], data: {} };
+  let delay30 = [];
+  let delayHold = [];
+
+  try { schedule = parseSchedule(await fetchCSV(SCHEDULE_CSV_URL)); }
+  catch(e){ console.warn("스케줄 시트를 불러오지 못했습니다:", e.message); }
+
+  try { outcall = parseOutCall(await fetchCSV(OUTCALL_CSV_URL)); }
+  catch(e){ console.warn("Out Call_Tracking 시트를 불러오지 못했습니다:", e.message); }
+
+  try { delay30 = parseDelayRows(await fetchCSV(DELAY30_CSV_URL)); }
+  catch(e){ console.warn("30분 지연 체크 시트를 불러오지 못했습니다:", e.message); }
+
+  try { delayHold = parseDelayRows(await fetchCSV(DELAYHOLD_CSV_URL)); }
+  catch(e){ console.warn("응대지연_보류 시트를 불러오지 못했습니다:", e.message); }
+
+  return { ...parseCSV(csText), schedule, outcall, delay30, delayHold };
+}
+
+/* ===================== 유틸 ===================== */
+function lastActiveDateIdx(dates, sections){
+  // 그날 최소 한 명이라도 상담인입이 있으면 "활동일"로 간주 (일요일 등 휴무일 제외)
+  for (let i = dates.length - 1; i >= 0; i--){
+    const d = dates[i];
+    const anyActivity = AGENT_ORDER.some(a => (sections["상담인입"]?.[a]?.[d] || 0) > 0);
+    if (anyActivity) return i;
+  }
+  return dates.length - 1;
+}
+function fmtPct(v){ return v==null ? "-" : Math.round(v*100) + "%"; }
+function fmtNum(v){ return v==null ? "-" : Math.round(v).toLocaleString(); }
+function sum(arr){ return arr.reduce((a,b)=>a+(b||0),0); }
+
+const DATA_YEAR = 2026; // 날짜 문자열(M/D)에는 연도가 없어 대시보드가 다루는 2026년으로 고정
+function mdToISO(md){
+  const [m,d] = md.split("/").map(Number);
+  return `${DATA_YEAR}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+}
+function isoToMD(iso){
+  const [,m,d] = iso.split("-").map(Number);
+  return `${m}/${d}`;
+}
+function onDateChange(iso){
+  if (!iso || !lastLoadedData) return;
+  selectedDateOverride = isoToMD(iso);
+  render(lastLoadedData);
+}
+function resetToLatest(){
+  selectedDateOverride = null;
+  if (lastLoadedData) render(lastLoadedData);
+}
+
+/* ===================== 렌더 ===================== */
+function render(data){
+  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold } = data;
+  const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
+
+  let todayIdx;
+  if (selectedDateOverride && dates.includes(selectedDateOverride)){
+    todayIdx = dates.indexOf(selectedDateOverride);
+  } else {
+    todayIdx = lastActiveDateIdx(dates, sections);
+    selectedDateOverride = null;
+  }
+  const today = dates[todayIdx];
+  const ydayIdx = Math.max(0, todayIdx - 1);
+  const yday = dates[ydayIdx];
+
+  // recent window for charts
+  const N = 14;
+  const start = Math.max(0, todayIdx - N + 1);
+  const recentDates = dates.slice(start, todayIdx + 1);
+  const weekDates = recentDates.slice(-7);
+
+  // 스케줄 정보 (오늘 기준)
+  const issueToday = schedule?.issueStatus?.[today];
+  const minStaffToday = schedule?.minStaff?.[today];
+  const totalStaffToday = schedule?.totalStaff?.[today];
+  const isUnderstaffed = issueToday === "정원 미달";
+
+  const inboundToday = sum(agents.map(a => sections["상담인입"][a][today]));
+  const inboundYday = sum(agents.map(a => sections["상담인입"][a][yday]));
+  const completeToday = sections["상담완료"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["상담완료"]?.[a]?.[today]));
+  const completeRateToday = sections["상담완료율_%"]?.["Total"]?.[today];
+  const delayToday = sections["30분 이상 지연"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today]));
+  const avgProcessToday = sections["상담처리율_%"]?.["AVG"]?.[today];
+
+  // WoW: 오늘 vs 7일 전 같은 요일
+  const wowIdx = todayIdx - 7;
+  const wowDate = dates[wowIdx];
+  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
+  const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
+
+  // 평균 담당자별 인입량 (오늘 / 전주 동요일)
+  const avgPerAgentToday = agents.length ? inboundToday / agents.length : null;
+  const avgPerAgentWow = (inboundWow!=null && agents.length) ? inboundWow / agents.length : null;
+  const avgPerAgentDelta = (avgPerAgentWow!=null && avgPerAgentWow>0) ? ((avgPerAgentToday-avgPerAgentWow)/avgPerAgentWow) : null;
+
+  // 아웃콜 완료율 (오늘 / 전주 동요일) - 전 카테고리 합산 가중평균
+  function outcallCompletionRate(date){
+    if (!outcall || !outcall.data) return { rate: null, inbound: 0, completed: 0 };
+    let inbound = 0, completed = 0;
+    Object.values(outcall.data).forEach(entities => {
+      const t = entities["Total"];
+      if (!t) return;
+      inbound += t["인입"]?.[date] || 0;
+      completed += t["통화완료"]?.[date] || 0;
+    });
+    return { rate: inbound>0 ? completed/inbound : null, inbound, completed };
+  }
+  const outcallToday = outcallCompletionRate(today);
+  const outcallWow = wowDate!=null ? outcallCompletionRate(wowDate) : { rate:null };
+  const outcallDelta = (outcallWow.rate!=null && outcallToday.rate!=null) ? (outcallToday.rate - outcallWow.rate) : null;
+
+  // 30분 이상 지연 WoW (Total 기준, 감소가 개선이므로 색상 반대로 적용)
+  const delayWow = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
+  const delayDelta = (delayWow!=null && delayWow>0) ? ((delayToday-delayWow)/delayWow) : null;
+
+  // 아웃콜 카테고리별 WoW 완료율
+  function catRateAt(cat, date){
+    const t = outcall.data[cat]?.["Total"];
+    return t?.["통화완료_%"]?.[date] ?? null;
+  }
+  const categoryWow = (outcall.categories||[]).map(c => {
+    const todayRate = catRateAt(c, today);
+    const wowRate = wowDate!=null ? catRateAt(c, wowDate) : null;
+    const delta = (todayRate!=null && wowRate!=null) ? todayRate - wowRate : null;
+    return { category:c, todayRate, wowRate, delta };
+  });
+
+  // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위 집계)
+  function weekKeyOf(md){
+    const [m,d] = md.split("/").map(Number);
+    const dt = new Date(DATA_YEAR, m-1, d);
+    const day = dt.getDay();
+    const diffToMonday = (day===0 ? -6 : 1-day);
+    const monday = new Date(dt); monday.setDate(dt.getDate()+diffToMonday);
+    return `${monday.getMonth()+1}/${monday.getDate()}`;
+  }
+  const weeklyOutcall = {};
+  (outcall.dates||[]).forEach(d => {
+    const wk = weekKeyOf(d);
+    weeklyOutcall[wk] = weeklyOutcall[wk] || { inbound:0, completed:0 };
+    Object.values(outcall.data).forEach(entities => {
+      const t = entities["Total"];
+      if (!t) return;
+      weeklyOutcall[wk].inbound += t["인입"]?.[d] || 0;
+      weeklyOutcall[wk].completed += t["통화완료"]?.[d] || 0;
+    });
+  });
+  const weekKeys = Object.keys(weeklyOutcall).sort((a,b) => {
+    const [am,ad] = a.split("/").map(Number), [bm,bd] = b.split("/").map(Number);
+    return (am*100+ad) - (bm*100+bd);
+  });
+
+  // 데이터 정합성 체크 (Total row vs 개별 합)
+  const gapNote = [];
+  if (totalRow){
+    const gap = (totalRow[today]||0) - inboundToday;
+    if (Math.abs(gap) > 0){
+      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundToday)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
+    }
+  }
+
+  // 인사이트 카드 자동 생성
+  const insights = [];
+  {
+    const rateEntries = agents.map(a => [a, sections["상담완료율_%"]?.[a]?.[today]]).filter(([,v]) => v!=null);
+    if (rateEntries.length){
+      const best = rateEntries.reduce((a,b) => b[1]>a[1] ? b : a);
+      insights.push(`오늘 완료율 최고 상담원은 <b>${best[0]}</b> (${fmtPct(best[1])})입니다.`);
+    }
+    const delayByAgent = {};
+    delay30.filter(r => r.date === today).forEach(r => { delayByAgent[r.agent] = (delayByAgent[r.agent]||0)+1; });
+    const delayEntries = Object.entries(delayByAgent);
+    if (delayEntries.length){
+      const worst = delayEntries.reduce((a,b) => b[1]>a[1] ? b : a);
+      insights.push(`오늘 30분 이상 지연이 가장 많은 상담원은 <b>${worst[0]}</b> (${worst[1]}건)입니다.`);
+    } else {
+      insights.push(`오늘 30분 이상 지연 건은 없습니다.`);
+    }
+    if (outcall && outcall.categories?.length){
+      const catRates = outcall.categories.map(c => {
+        const t = outcall.data[c]?.["Total"];
+        const rate = t?.["통화완료_%"]?.[today];
+        return [c, rate];
+      }).filter(([,v]) => v!=null);
+      if (catRates.length){
+        const bestCat = catRates.reduce((a,b) => b[1]>a[1] ? b : a);
+        insights.push(`아웃콜 카테고리 중 완료율이 가장 높은 항목은 <b>${bestCat[0]}</b> (${fmtPct(bestCat[1])})입니다.`);
+      }
+    }
+    if (isUnderstaffed){
+      insights.push(`오늘은 <b>정원 미달</b> 상태입니다 (근무 ${totalStaffToday}명 / 최소 ${minStaffToday}명).`);
+    }
+  }
+
+  if (agentDetailChart){ agentDetailChart.destroy(); agentDetailChart = null; }
+  openAgentPanel = null;
+
+  const app = document.getElementById("app");
+  app.innerHTML = `
+    <header>
+      <div>
+        <h1>CX 생산성 · CS/아웃콜 트래킹 대시보드</h1>
+        <div class="sub">CS_Tracking + Out Call_Tracking · 오더히어로 CX팀 · 기준일 ${today}</div>
+      </div>
+      <div class="status">
+        ${issueToday ? `<span class="badge ${isUnderstaffed?'badge-bad':'badge-good'}">${isUnderstaffed?'⚠️ ':'✅ '}${issueToday}${totalStaffToday!=null?` (${totalStaffToday}/${minStaffToday}명)`:''}</span>` : ""}
+        <input type="date" id="datePicker" value="${mdToISO(today)}" min="${mdToISO(dates[0])}" max="${mdToISO(dates[dates.length-1])}" onchange="onDateChange(this.value)">
+        ${selectedDateOverride ? `<button onclick="resetToLatest()">최신으로</button>` : ""}
+        <span class="dot"></span>
+        <span id="lastUpdated">마지막 갱신: 방금 전</span>
+        <button id="refreshBtn">지금 새로고침</button>
+      </div>
+    </header>
+    ${gapNote.length ? `<div class="banner">⚠️ ${gapNote.join(" ")}</div>` : ""}
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>인사이트</h2>
+      <ul style="margin:0;padding-left:18px;font-size:13px;line-height:2;color:var(--ink);">
+        ${insights.map(i => `<li>${i}</li>`).join("")}
+      </ul>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">${today} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
+        <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
+        <div class="delta">평균 처리율 ${fmtPct(avgProcessToday)}</div></div>
+      <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
+        <div class="delta ${delayDelta==null?'':(delayDelta<=0?'up':'down')}">${delayDelta!=null ? (delayDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(delayDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
+        <div class="delta ${outcallDelta==null?'':(outcallDelta>=0?'up':'down')}">${outcallDelta!=null ? (outcallDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(outcallDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">평균 담당자별 인입</div><div class="val">${avgPerAgentToday!=null?avgPerAgentToday.toFixed(1):'-'}</div>
+        <div class="delta ${avgPerAgentDelta==null?'':(avgPerAgentDelta>=0?'up':'down')}">${avgPerAgentDelta!=null ? (avgPerAgentDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(avgPerAgentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">오늘 근무 인원</div><div class="val">${totalStaffToday!=null ? totalStaffToday : '-'}${minStaffToday!=null?`<span style="font-size:14px;color:var(--ink-dim);"> / 최소 ${minStaffToday}</span>`:''}</div>
+        <div class="delta ${isUnderstaffed?'down':'up'}">${issueToday || '스케줄 데이터 없음'}</div></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>일별 상담인입 추이 <span class="tag">최근 ${recentDates.length}일</span></h2>
+        <canvas id="chartInbound"></canvas>
+      </div>
+      <div class="card">
+        <h2>상담원별 인입 랭킹 <span class="tag">TOP 티어 · ${today}</span></h2>
+        <canvas id="chartShare"></canvas>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>상담원별 인입 (일별 누적) <span class="tag">최근 ${recentDates.length}일</span></h2>
+        <canvas id="chartAgentStack"></canvas>
+      </div>
+      <div class="card">
+        <h2>처리율 / 완료율 추이 <span class="tag">전체 평균</span></h2>
+        <canvas id="chartRates"></canvas>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>30분 이상 지연 <span class="tag">상담원별</span></h2>
+        <canvas id="chartDelay"></canvas>
+      </div>
+      <div class="card">
+        <h2>CPH(생산성) <span class="tag">상담원별 · 최근 ${recentDates.length}일 평균</span></h2>
+        <canvas id="chartCPH"></canvas>
+        <div id="cphBelowAvgNote" style="margin-top:10px;font-size:12px;color:var(--ink-dim);"></div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>Out Call_Tracking <span class="tag">카테고리별 · ${today}</span></h2>
+        <div class="kpis" style="margin-bottom:16px;">
+          ${(outcall.categories||[]).map(c => {
+            const t = outcall.data[c]?.["Total"];
+            const inb = t?.["인입"]?.[today];
+            const rate = t?.["통화완료_%"]?.[today];
+            const cw = categoryWow.find(x => x.category===c);
+            const d = cw?.delta;
+            return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(inb)}</div>
+              <div class="delta">완료율 ${fmtPct(rate)}</div>
+              <div class="delta ${d==null?'':(d>=0?'up':'down')}">${d!=null ? (d>=0?'▲ ':'▼ ')+Math.abs(Math.round(d*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>`;
+          }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">Out Call 데이터 없음</div>'}
+        </div>
+        <canvas id="chartOutcall"></canvas>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>아웃콜 주별 트래킹 <span class="tag">전체 합산</span></h2>
+        <canvas id="chartOutcallWeekly"></canvas>
+      </div>
+      <div class="card">
+        <h2>아웃콜 카테고리별 담당자 상세 <span class="tag">통화완료 · ${today}</span></h2>
+        <canvas id="chartOutcallByAgent"></canvas>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>상담원별 상세 <span class="tag">이름을 클릭하면 펼쳐집니다</span></h2>
+        ${agents.map(a => {
+          const inb = sections["상담인입"][a][today] || 0;
+          const cr = sections["상담완료율_%"]?.[a]?.[today];
+          return `
+          <div class="acc-item">
+            <div class="acc-header" id="acc-header-${a}" onclick="toggleAgent('${a}')">
+              <span class="acc-dot" style="background:${AGENT_COLORS[a]}"></span>
+              <span class="acc-name">${a}</span>
+              <span class="acc-summary">오늘 인입 ${fmtNum(inb)}건 · 완료율 ${fmtPct(cr)}</span>
+              <span class="acc-chev">▾</span>
+            </div>
+            <div class="acc-body" id="acc-body-${a}"></div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>일별 상세 (DoD) <span class="tag">${yday} → ${today}</span></h2>
+        <table>
+          <thead><tr><th>상담원</th><th>${yday} 인입</th><th>${today} 인입</th><th>증감</th><th>완료율</th><th>지연</th></tr></thead>
+          <tbody>
+            ${agents.map(a => {
+              const y = sections["상담인입"][a][yday] || 0;
+              const t = sections["상담인입"][a][today] || 0;
+              const diff = t - y;
+              const cr = sections["상담완료율_%"]?.[a]?.[today];
+              const dl = sections["30분 이상 지연"]?.[a]?.[today] || 0;
+              return `<tr><td>${a}</td><td>${fmtNum(y)}</td><td>${fmtNum(t)}</td>
+                <td class="${diff>=0?'up':'down'}" style="color:${diff>=0?'var(--good)':'var(--bad)'}">${diff>=0?'+':''}${diff}</td>
+                <td>${fmtPct(cr)}</td><td>${fmtNum(dl)}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>근무 스케줄 <span class="tag">최근 ${weekDates.length}일</span></h2>
+        <table>
+          <thead><tr><th>상담원</th>${weekDates.map(d=>`<th>${d}</th>`).join("")}</tr></thead>
+          <tbody>
+            ${agents.map(a => `<tr><td>${a}</td>${weekDates.map(d=>{
+              const st = schedule?.schedule?.[a]?.[d];
+              const isOff = st && OFF_STATUSES.includes(st);
+              const color = st==null ? 'var(--ink-dim)' : isOff ? 'var(--accent)' : 'var(--good)';
+              return `<td style="color:${color}">${st || '-'}</td>`;
+            }).join("")}</tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="footer-note">
+      데이터 출처: CS_Tracking · 근무 스케줄 · Out Call_Tracking · 30분 지연 체크 · 응대지연_보류 (Google Sheets 웹 게시 CSV) · ${REFRESH_MS/60000}분마다 자동 갱신 · 일요일은 휴무로 인입 0건 처리됨 · 상단 날짜 선택기로 과거 특정일 조회 가능.
+    </div>
+  `;
+
+  document.getElementById("refreshBtn").onclick = () => refresh(true);
+
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys, weeklyOutcall });
+  startCountdown();
+
+  lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold };
+  openAgentPanel = null;
+  agentDetailChart = null;
+}
+
+function destroyCharts(){
+  Object.values(charts).forEach(c => c && c.destroy());
+  charts = {};
+}
+
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyOutcall }){
+  destroyCharts();
+  Chart.defaults.color = "#8B96AD";
+  Chart.defaults.borderColor = "#28324D";
+  Chart.defaults.font.family = "Pretendard, sans-serif";
+
+  const totals = dates.map(d => sum(agents.map(a => sections["상담인입"][a][d])));
+  const peakIdx = totals.indexOf(Math.max(...totals));
+
+  charts.inbound = new Chart(document.getElementById("chartInbound"), {
+    type: "bar",
+    data: { labels: dates, datasets: [{
+      data: totals,
+      backgroundColor: dates.map((_,i)=> i===peakIdx ? "#E8A33D" : "#4C6EF555"),
+      borderRadius: 4
+    }]},
+    options: { plugins:{legend:{display:false}}, scales:{ y:{ grid:{color:"#28324D"} }, x:{ grid:{display:false} } } }
+  });
+
+  const shareToday = agents.map(a => sections["상담인입"][a][today] || 0);
+  const rankOrder = agents.map((a,i) => ({ agent:a, val: shareToday[i] }))
+    .sort((a,b) => b.val - a.val);
+  const TIER_COLORS = ["#E8A33D","#C9CDD6","#B08D57"]; // 금/은/동
+  charts.share = new Chart(document.getElementById("chartShare"), {
+    type: "bar",
+    data: {
+      labels: rankOrder.map((r,i) => `${i+1}위 ${r.agent}`),
+      datasets: [{
+        data: rankOrder.map(r => r.val),
+        backgroundColor: rankOrder.map((r,i) => i<3 ? TIER_COLORS[i] : AGENT_COLORS[r.agent]+"AA"),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      indexAxis: "y",
+      plugins: { legend: { display:false } },
+      scales: { x:{ grid:{color:"#28324D"} }, y:{ grid:{display:false} } }
+    }
+  });
+
+  charts.agentStack = new Chart(document.getElementById("chartAgentStack"), {
+    type: "bar",
+    data: { labels: dates, datasets: agents.map(a => ({
+      label: a, data: dates.map(d => sections["상담인입"][a][d] || 0),
+      backgroundColor: AGENT_COLORS[a], stack: "s"
+    }))},
+    options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+      scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
+  });
+
+  charts.rates = new Chart(document.getElementById("chartRates"), {
+    type: "line",
+    data: { labels: dates, datasets: [
+      { label:"처리율(AVG)", data: dates.map(d=>{const v=sections["상담처리율_%"]?.["AVG"]?.[d]; return v==null?null:v*100;}), borderColor:"#4C6EF5", tension:.3, pointRadius:2, spanGaps:true },
+      { label:"완료율(Total)", data: dates.map(d=>{const v=sections["상담완료율_%"]?.["Total"]?.[d]; return v==null?null:v*100;}), borderColor:"#12B886", tension:.3, pointRadius:2, spanGaps:true }
+    ]},
+    options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+      scales:{ y:{ ticks:{callback:v=>v+"%"}, grid:{color:"#28324D"} }, x:{grid:{display:false}} } }
+  });
+
+  charts.delay = new Chart(document.getElementById("chartDelay"), {
+    type: "bar",
+    data: { labels: dates, datasets: agents.map(a => ({
+      label:a, data: dates.map(d=>sections["30분 이상 지연"]?.[a]?.[d] || 0),
+      backgroundColor: AGENT_COLORS[a], stack:"d"
+    }))},
+    options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+      scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
+  });
+
+  const cphAvail = sections["CPH(생산성)"];
+  let belowAvgAgents = [];
+  if (cphAvail){
+    const cphAvg = agents.map(a => {
+      const vals = dates.map(d=>cphAvail[a]?.[d]).filter(v=>v!=null);
+      return vals.length ? sum(vals)/vals.length : 0;
+    });
+    const validVals = cphAvg.filter(v => v>0);
+    const overallAvg = validVals.length ? sum(validVals)/validVals.length : 0;
+    belowAvgAgents = agents.filter((a,i) => cphAvg[i] > 0 && cphAvg[i] < overallAvg);
+
+    charts.cph = new Chart(document.getElementById("chartCPH"), {
+      data: {
+        labels: agents,
+        datasets: [
+          {
+            type: "bar",
+            data: cphAvg,
+            backgroundColor: agents.map((a,i) => cphAvg[i] < overallAvg ? "#F0555B99" : "#2FBF8F99"),
+            borderRadius: 4,
+            order: 2
+          },
+          {
+            type: "line",
+            label: `전체 평균 (${overallAvg.toFixed(1)})`,
+            data: agents.map(() => overallAvg),
+            borderColor: "#E8A33D",
+            borderWidth: 2,
+            borderDash: [6,4],
+            pointRadius: 0,
+            order: 1
+          }
+        ]
+      },
+      options: {
+        indexAxis: "y",
+        plugins: { legend: { display:true, position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}} } },
+        scales: { x:{grid:{color:"#28324D"}}, y:{grid:{display:false}} }
+      }
+    });
+    const noteEl = document.getElementById("cphBelowAvgNote");
+    if (noteEl){
+      noteEl.textContent = belowAvgAgents.length
+        ? `평균(${overallAvg.toFixed(1)}) 미만: ${belowAvgAgents.join(", ")}`
+        : `전 상담원이 평균 이상입니다.`;
+    }
+  }
+
+  const outcallCanvas = document.getElementById("chartOutcall");
+  if (outcallCanvas && outcall?.categories?.length){
+    const cats = outcall.categories;
+    charts.outcall = new Chart(outcallCanvas, {
+      data: {
+        labels: cats,
+        datasets: [
+          { type:"bar", label:"인입", data: cats.map(c => outcall.data[c]?.["Total"]?.["인입"]?.[today] ?? 0), backgroundColor:"#4C6EF588", borderRadius:4 },
+          { type:"bar", label:"통화완료", data: cats.map(c => outcall.data[c]?.["Total"]?.["통화완료"]?.[today] ?? 0), backgroundColor:"#12B88688", borderRadius:4 },
+          { type:"bar", label:"미처리", data: cats.map(c => outcall.data[c]?.["Total"]?.["미처리"]?.[today] ?? 0), backgroundColor:"#F0555B88", borderRadius:4 }
+        ]
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}} } }
+    });
+  }
+
+  const weeklyCanvas = document.getElementById("chartOutcallWeekly");
+  if (weeklyCanvas && weekKeys?.length){
+    charts.outcallWeekly = new Chart(weeklyCanvas, {
+      data: {
+        labels: weekKeys.map(w => `${w} 주`),
+        datasets: [
+          { type:"bar", label:"인입", data: weekKeys.map(w => weeklyOutcall[w].inbound), backgroundColor:"#4C6EF588", borderRadius:4, order:2 },
+          { type:"line", label:"통화완료", data: weekKeys.map(w => weeklyOutcall[w].completed), borderColor:"#12B886", tension:.3, pointRadius:3, order:1 }
+        ]
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}} } }
+    });
+  }
+
+  const byAgentCanvas = document.getElementById("chartOutcallByAgent");
+  if (byAgentCanvas && outcall?.categories?.length){
+    const cats = outcall.categories;
+    const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC"];
+    charts.outcallByAgent = new Chart(byAgentCanvas, {
+      type: "bar",
+      data: {
+        labels: agents,
+        datasets: cats.map((c,i) => ({
+          label: c,
+          data: agents.map(a => outcall.data[c]?.[a]?.["통화완료"]?.[today] ?? 0),
+          backgroundColor: palette[i % palette.length],
+          stack: "cat"
+        }))
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
+    });
+  }
+}
+
+/* ===================== 상담원별 상세 아코디언 ===================== */
+function toggleAgent(agent){
+  if (!lastCtx) return;
+  const wasOpen = openAgentPanel === agent;
+
+  // 다른 패널 모두 닫기
+  document.querySelectorAll(".acc-body").forEach(b => { b.style.display = "none"; b.innerHTML = ""; });
+  document.querySelectorAll(".acc-header").forEach(h => h.classList.remove("active"));
+  if (agentDetailChart){ agentDetailChart.destroy(); agentDetailChart = null; }
+
+  if (wasOpen){ openAgentPanel = null; return; }
+
+  openAgentPanel = agent;
+  const header = document.getElementById("acc-header-" + agent);
+  const body = document.getElementById("acc-body-" + agent);
+  header.classList.add("active");
+  body.style.display = "block";
+  body.innerHTML = buildAgentDetailHTML(agent);
+  drawAgentDetailChart(agent);
+}
+
+function buildAgentDetailHTML(agent){
+  const { sections, today, schedule, dates, delay30, delayHold } = lastCtx;
+  const inb = sections["상담인입"]?.[agent]?.[today];
+  const comp = sections["상담완료"]?.[agent]?.[today];
+  const procRate = sections["상담처리율_%"]?.[agent]?.[today];
+  const compRate = sections["상담완료율_%"]?.[agent]?.[today];
+  const delay = sections["30분 이상 지연"]?.[agent]?.[today];
+  const cph = sections["CPH(생산성)"]?.[agent]?.[today];
+  const workStatus = schedule?.schedule?.[agent]?.[today];
+
+  // 근무일 기반 생산성: 최근 기간 중 근무일수 대비 평균 처리 건수
+  const workDays = dates.filter(d => {
+    const st = schedule?.schedule?.[agent]?.[d];
+    return st && !OFF_STATUSES.includes(st);
+  }).length;
+  const totalCompleted = sum(dates.map(d => sections["상담완료"]?.[agent]?.[d] || 0));
+  const productivity = workDays > 0 ? totalCompleted / workDays : null;
+
+  function mdSortKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; }
+  const delay30Rows = delay30.filter(r => r.agent === agent).sort((a,b) => mdSortKey(b.date) - mdSortKey(a.date));
+  const delayHoldRows = delayHold.filter(r => r.agent === agent).sort((a,b) => mdSortKey(b.date) - mdSortKey(a.date));
+
+  function subTable(rows, emptyMsg){
+    if (!rows.length) return `<div style="color:var(--ink-dim);font-size:12px;padding:8px 0;">${emptyMsg}</div>`;
+    const shown = rows.slice(0, 10);
+    return `
+      <table style="font-size:12px;">
+        <thead><tr><th>날짜</th><th>사업장</th><th>소요시간</th><th>사유</th><th>링크</th></tr></thead>
+        <tbody>
+          ${shown.map(r => `<tr>
+            <td>${r.date}</td><td style="text-align:left;">${r.store||'-'}</td><td>${r.duration||'-'}</td>
+            <td style="text-align:left;">${r.reason||'-'}</td>
+            <td>${r.url ? `<a href="${r.url}" target="_blank" style="color:var(--accent);">보기</a>` : '-'}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+      ${rows.length > 10 ? `<div style="color:var(--ink-dim);font-size:11.5px;margin-top:6px;">전체 ${rows.length}건 중 최근 10건 표시</div>` : ""}
+    `;
+  }
+
+  return `
+    ${workStatus ? `<div style="margin-bottom:12px;font-size:12.5px;color:var(--ink-dim);">오늘 근무 상태: <span style="color:${OFF_STATUSES.includes(workStatus)?'var(--accent)':'var(--good)'};font-weight:600;">${workStatus}</span></div>` : ""}
+    <div class="acc-kpis">
+      <div class="acc-kpi"><div class="l">상담인입</div><div class="v">${fmtNum(inb)}</div></div>
+      <div class="acc-kpi"><div class="l">상담완료</div><div class="v">${fmtNum(comp)}</div></div>
+      <div class="acc-kpi"><div class="l">처리율</div><div class="v">${fmtPct(procRate)}</div></div>
+      <div class="acc-kpi"><div class="l">완료율</div><div class="v">${fmtPct(compRate)}</div></div>
+      <div class="acc-kpi"><div class="l">30분 이상 지연</div><div class="v">${fmtNum(delay)}</div></div>
+      <div class="acc-kpi"><div class="l">CPH</div><div class="v">${cph!=null ? fmtNum(cph) : "-"}</div></div>
+      <div class="acc-kpi"><div class="l">근무일 기준 생산성</div><div class="v">${productivity!=null ? productivity.toFixed(1)+'건/일' : '-'}</div></div>
+    </div>
+    <canvas id="chartAgentDetail" style="max-height:220px"></canvas>
+    <div style="margin-top:18px;font-size:13px;font-weight:600;">30분 이상 지연 상세</div>
+    ${subTable(delay30Rows, "해당 상담원의 30분 이상 지연 기록이 없습니다.")}
+    <div style="margin-top:18px;font-size:13px;font-weight:600;">응대지연(2시간 이상) 상세</div>
+    ${subTable(delayHoldRows, "해당 상담원의 2시간 이상 응대지연 기록이 없습니다.")}
+  `;
+}
+
+function drawAgentDetailChart(agent){
+  const { dates, sections } = lastCtx;
+  const canvas = document.getElementById("chartAgentDetail");
+  if (!canvas) return;
+  agentDetailChart = new Chart(canvas, {
+    data: {
+      labels: dates,
+      datasets: [
+        {
+          type: "bar",
+          label: "상담인입",
+          data: dates.map(d => sections["상담인입"]?.[agent]?.[d] ?? null),
+          backgroundColor: AGENT_COLORS[agent] + "88",
+          borderRadius: 4,
+          order: 2
+        },
+        {
+          type: "line",
+          label: "완료율(%)",
+          data: dates.map(d => { const v = sections["상담완료율_%"]?.[agent]?.[d]; return v==null? null : v*100; }),
+          borderColor: "#E8A33D",
+          yAxisID: "y1",
+          tension: .3,
+          pointRadius: 2,
+          spanGaps: true,
+          order: 1
+        }
+      ]
+    },
+    options: {
+      plugins:{ legend:{ position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}} } },
+      scales:{
+        x:{ grid:{display:false} },
+        y:{ grid:{color:"#28324D"}, title:{display:true,text:"인입 건수",font:{size:10}} },
+        y1:{ position:"right", min:0, max:100, ticks:{callback:v=>v+"%"}, grid:{display:false} }
+      }
+    }
+  });
+}
+
+/* ===================== 갱신 로직 ===================== */
+let secondsLeft = REFRESH_MS/1000;
+function startCountdown(){
+  clearInterval(countdownTimer);
+  secondsLeft = REFRESH_MS/1000;
+  countdownTimer = setInterval(() => {
+    secondsLeft--;
+    const el = document.getElementById("lastUpdated");
+    if (el) el.textContent = `다음 자동 갱신까지 ${Math.max(0,secondsLeft)}초`;
+    if (secondsLeft <= 0) refresh(false);
+  }, 1000);
+}
+
+async function refresh(manual){
+  try{
+    const data = await loadData();
+    lastLoadedData = data;
+    render(data);
+  }catch(e){
+    console.error(e);
+    if (manual) alert("데이터를 불러오지 못했습니다: " + e.message);
+  }
+}
+
+refresh(true);
+</script>
+</body>
+</html>
