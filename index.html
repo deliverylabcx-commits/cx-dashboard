@@ -77,7 +77,7 @@
 <script>
 /* ===================== 설정 ===================== */
 const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?output=csv";
-const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTjti7FdTYQVky3fer7jhzdfQxh5AXJeFWNi-Nt6WkomVsBRbf-NsheB4KLnJ1EpYY97an7--YqNn7I/pub?output=csv";
+const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTjti7FdTYQVky3fer7jhzdfQxh5AXJeFWNi-Nt6WkomVsBRbf-NsheB4KLnJ1EpYY97an7--YqNn7I/pub?gid=0&single=true&output=csv";
 const OUTCALL_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=25550252&single=true&output=csv";
 const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1307884512&single=true&output=csv";
 const DELAYHOLD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=634573420&single=true&output=csv";
@@ -393,6 +393,47 @@ function render(data){
   const outcallWow = wowDate!=null ? outcallCompletionRate(wowDate) : { rate:null };
   const outcallDelta = (outcallWow.rate!=null && outcallToday.rate!=null) ? (outcallToday.rate - outcallWow.rate) : null;
 
+  // 30분 이상 지연 WoW (Total 기준, 감소가 개선이므로 색상 반대로 적용)
+  const delayWow = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
+  const delayDelta = (delayWow!=null && delayWow>0) ? ((delayToday-delayWow)/delayWow) : null;
+
+  // 아웃콜 카테고리별 WoW 완료율
+  function catRateAt(cat, date){
+    const t = outcall.data[cat]?.["Total"];
+    return t?.["통화완료_%"]?.[date] ?? null;
+  }
+  const categoryWow = (outcall.categories||[]).map(c => {
+    const todayRate = catRateAt(c, today);
+    const wowRate = wowDate!=null ? catRateAt(c, wowDate) : null;
+    const delta = (todayRate!=null && wowRate!=null) ? todayRate - wowRate : null;
+    return { category:c, todayRate, wowRate, delta };
+  });
+
+  // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위 집계)
+  function weekKeyOf(md){
+    const [m,d] = md.split("/").map(Number);
+    const dt = new Date(DATA_YEAR, m-1, d);
+    const day = dt.getDay();
+    const diffToMonday = (day===0 ? -6 : 1-day);
+    const monday = new Date(dt); monday.setDate(dt.getDate()+diffToMonday);
+    return `${monday.getMonth()+1}/${monday.getDate()}`;
+  }
+  const weeklyOutcall = {};
+  (outcall.dates||[]).forEach(d => {
+    const wk = weekKeyOf(d);
+    weeklyOutcall[wk] = weeklyOutcall[wk] || { inbound:0, completed:0 };
+    Object.values(outcall.data).forEach(entities => {
+      const t = entities["Total"];
+      if (!t) return;
+      weeklyOutcall[wk].inbound += t["인입"]?.[d] || 0;
+      weeklyOutcall[wk].completed += t["통화완료"]?.[d] || 0;
+    });
+  });
+  const weekKeys = Object.keys(weeklyOutcall).sort((a,b) => {
+    const [am,ad] = a.split("/").map(Number), [bm,bd] = b.split("/").map(Number);
+    return (am*100+ad) - (bm*100+bd);
+  });
+
   // 데이터 정합성 체크 (Total row vs 개별 합)
   const gapNote = [];
   if (totalRow){
@@ -468,8 +509,8 @@ function render(data){
         <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta">평균 처리율 ${fmtPct(avgProcessToday)}</div></div>
-      <div class="kpi"><div class="label">30분 이상 지연</div><div class="val">${fmtNum(delayToday)}</div>
-        <div class="delta ${delayToday>0?'down':'up'}">${delayToday>0 ? '지연 발생' : '지연 없음'}</div></div>
+      <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
+        <div class="delta ${delayDelta==null?'':(delayDelta<=0?'up':'down')}">${delayDelta!=null ? (delayDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(delayDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
         <div class="delta ${outcallDelta==null?'':(outcallDelta>=0?'up':'down')}">${outcallDelta!=null ? (outcallDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(outcallDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">평균 담당자별 인입</div><div class="val">${avgPerAgentToday!=null?avgPerAgentToday.toFixed(1):'-'}</div>
@@ -484,7 +525,7 @@ function render(data){
         <canvas id="chartInbound"></canvas>
       </div>
       <div class="card">
-        <h2>상담원별 인입 비중 <span class="tag">${today}</span></h2>
+        <h2>상담원별 인입 랭킹 <span class="tag">TOP 티어 · ${today}</span></h2>
         <canvas id="chartShare"></canvas>
       </div>
     </div>
@@ -508,6 +549,7 @@ function render(data){
       <div class="card">
         <h2>CPH(생산성) <span class="tag">상담원별 · 최근 ${recentDates.length}일 평균</span></h2>
         <canvas id="chartCPH"></canvas>
+        <div id="cphBelowAvgNote" style="margin-top:10px;font-size:12px;color:var(--ink-dim);"></div>
       </div>
     </div>
 
@@ -519,11 +561,25 @@ function render(data){
             const t = outcall.data[c]?.["Total"];
             const inb = t?.["인입"]?.[today];
             const rate = t?.["통화완료_%"]?.[today];
+            const cw = categoryWow.find(x => x.category===c);
+            const d = cw?.delta;
             return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(inb)}</div>
-              <div class="delta">완료율 ${fmtPct(rate)}</div></div>`;
+              <div class="delta">완료율 ${fmtPct(rate)}</div>
+              <div class="delta ${d==null?'':(d>=0?'up':'down')}">${d!=null ? (d>=0?'▲ ':'▼ ')+Math.abs(Math.round(d*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>`;
           }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">Out Call 데이터 없음</div>'}
         </div>
         <canvas id="chartOutcall"></canvas>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>아웃콜 주별 트래킹 <span class="tag">전체 합산</span></h2>
+        <canvas id="chartOutcallWeekly"></canvas>
+      </div>
+      <div class="card">
+        <h2>아웃콜 카테고리별 담당자 상세 <span class="tag">통화완료 · ${today}</span></h2>
+        <canvas id="chartOutcallByAgent"></canvas>
       </div>
     </div>
 
@@ -592,7 +648,7 @@ function render(data){
 
   document.getElementById("refreshBtn").onclick = () => refresh(true);
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall });
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys, weeklyOutcall });
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold };
@@ -605,7 +661,7 @@ function destroyCharts(){
   charts = {};
 }
 
-function drawCharts({ dates, sections, agents, today, outcall }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyOutcall }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
@@ -625,10 +681,24 @@ function drawCharts({ dates, sections, agents, today, outcall }){
   });
 
   const shareToday = agents.map(a => sections["상담인입"][a][today] || 0);
+  const rankOrder = agents.map((a,i) => ({ agent:a, val: shareToday[i] }))
+    .sort((a,b) => b.val - a.val);
+  const TIER_COLORS = ["#E8A33D","#C9CDD6","#B08D57"]; // 금/은/동
   charts.share = new Chart(document.getElementById("chartShare"), {
-    type: "doughnut",
-    data: { labels: agents, datasets: [{ data: shareToday, backgroundColor: agents.map(a=>AGENT_COLORS[a]) }]},
-    options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:12,font:{size:11}}}} }
+    type: "bar",
+    data: {
+      labels: rankOrder.map((r,i) => `${i+1}위 ${r.agent}`),
+      datasets: [{
+        data: rankOrder.map(r => r.val),
+        backgroundColor: rankOrder.map((r,i) => i<3 ? TIER_COLORS[i] : AGENT_COLORS[r.agent]+"AA"),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      indexAxis: "y",
+      plugins: { legend: { display:false } },
+      scales: { x:{ grid:{color:"#28324D"} }, y:{ grid:{display:false} } }
+    }
   });
 
   charts.agentStack = new Chart(document.getElementById("chartAgentStack"), {
@@ -662,16 +732,51 @@ function drawCharts({ dates, sections, agents, today, outcall }){
   });
 
   const cphAvail = sections["CPH(생산성)"];
+  let belowAvgAgents = [];
   if (cphAvail){
     const cphAvg = agents.map(a => {
       const vals = dates.map(d=>cphAvail[a]?.[d]).filter(v=>v!=null);
       return vals.length ? sum(vals)/vals.length : 0;
     });
+    const validVals = cphAvg.filter(v => v>0);
+    const overallAvg = validVals.length ? sum(validVals)/validVals.length : 0;
+    belowAvgAgents = agents.filter((a,i) => cphAvg[i] > 0 && cphAvg[i] < overallAvg);
+
     charts.cph = new Chart(document.getElementById("chartCPH"), {
-      type: "bar",
-      data: { labels: agents, datasets: [{ data: cphAvg, backgroundColor: agents.map(a=>AGENT_COLORS[a]), borderRadius:4 }]},
-      options: { indexAxis:"y", plugins:{legend:{display:false}}, scales:{ x:{grid:{color:"#28324D"}}, y:{grid:{display:false}} } }
+      data: {
+        labels: agents,
+        datasets: [
+          {
+            type: "bar",
+            data: cphAvg,
+            backgroundColor: agents.map((a,i) => cphAvg[i] < overallAvg ? "#F0555B99" : "#2FBF8F99"),
+            borderRadius: 4,
+            order: 2
+          },
+          {
+            type: "line",
+            label: `전체 평균 (${overallAvg.toFixed(1)})`,
+            data: agents.map(() => overallAvg),
+            borderColor: "#E8A33D",
+            borderWidth: 2,
+            borderDash: [6,4],
+            pointRadius: 0,
+            order: 1
+          }
+        ]
+      },
+      options: {
+        indexAxis: "y",
+        plugins: { legend: { display:true, position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}} } },
+        scales: { x:{grid:{color:"#28324D"}}, y:{grid:{display:false}} }
+      }
     });
+    const noteEl = document.getElementById("cphBelowAvgNote");
+    if (noteEl){
+      noteEl.textContent = belowAvgAgents.length
+        ? `평균(${overallAvg.toFixed(1)}) 미만: ${belowAvgAgents.join(", ")}`
+        : `전 상담원이 평균 이상입니다.`;
+    }
   }
 
   const outcallCanvas = document.getElementById("chartOutcall");
@@ -688,6 +793,41 @@ function drawCharts({ dates, sections, agents, today, outcall }){
       },
       options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
         scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}} } }
+    });
+  }
+
+  const weeklyCanvas = document.getElementById("chartOutcallWeekly");
+  if (weeklyCanvas && weekKeys?.length){
+    charts.outcallWeekly = new Chart(weeklyCanvas, {
+      data: {
+        labels: weekKeys.map(w => `${w} 주`),
+        datasets: [
+          { type:"bar", label:"인입", data: weekKeys.map(w => weeklyOutcall[w].inbound), backgroundColor:"#4C6EF588", borderRadius:4, order:2 },
+          { type:"line", label:"통화완료", data: weekKeys.map(w => weeklyOutcall[w].completed), borderColor:"#12B886", tension:.3, pointRadius:3, order:1 }
+        ]
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}} } }
+    });
+  }
+
+  const byAgentCanvas = document.getElementById("chartOutcallByAgent");
+  if (byAgentCanvas && outcall?.categories?.length){
+    const cats = outcall.categories;
+    const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC"];
+    charts.outcallByAgent = new Chart(byAgentCanvas, {
+      type: "bar",
+      data: {
+        labels: agents,
+        datasets: cats.map((c,i) => ({
+          label: c,
+          data: agents.map(a => outcall.data[c]?.[a]?.["통화완료"]?.[today] ?? 0),
+          backgroundColor: palette[i % palette.length],
+          stack: "cat"
+        }))
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
     });
   }
 }
