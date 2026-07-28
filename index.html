@@ -126,7 +126,10 @@ function parseCSV(text){
       dateCols.forEach(({col,date}) => { totalRow[date] = toNum(row[col]); });
       continue;
     }
-    if (KNOWN_SECTIONS.includes(col1)) currentSection = col1;
+    if (col1){
+      if (KNOWN_SECTIONS.includes(col1)) currentSection = col1;
+      else if (col1 !== "완료건 대비 3%") currentSection = null; // 알려진 주석 행("완료건 대비 3%")은 무시하고 유지, 그 외 미확인 라벨은 새 섹션 시작으로 간주해 이전 섹션 오염 방지
+    }
     if (!currentSection || !col2) continue;
 
     sections[currentSection] = sections[currentSection] || {};
@@ -437,13 +440,27 @@ function render(data){
   const totalStaffToday = schedule?.totalStaff?.[today];
   const isUnderstaffed = issueToday === "정원 미달";
 
-  const inboundAgentsSum = sum(agents.map(a => sections["상담인입"][a][today]));
+  // 음수 이상치 방어: 진행 중인 당일(오늘) 컬럼은 시트 갱신 타이밍에 따라 일시적으로 음수가 나올 수 있음
+  const dataAnomalies = [];
+  function clampNeg(raw, label){
+    if (raw != null && raw < 0){
+      dataAnomalies.push(`${label}: 원본값 ${fmtNum(raw)} (음수) → 0으로 보정`);
+      return 0;
+    }
+    return raw;
+  }
+
+  const inboundAgentsSumRaw = sum(agents.map(a => sections["상담인입"][a][today]));
+  const inboundAgentsSum = clampNeg(inboundAgentsSumRaw, "상담인입 합계");
   const inboundYdayAgentsSum = sum(agents.map(a => sections["상담인입"][a][yday]));
-  const inboundToday = totalRow?.[today] ?? inboundAgentsSum;
+  const inboundToday = clampNeg(totalRow?.[today] ?? inboundAgentsSum, "상담인입_Total");
   const inboundYday = totalRow?.[yday] ?? inboundYdayAgentsSum;
-  const completeToday = sections["상담완료"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["상담완료"]?.[a]?.[today]));
+  const completeToday = clampNeg(sections["상담완료"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])), "상담완료_Total");
   const completeRateToday = sections["상담완료율_%"]?.["Total"]?.[today];
-  const delayToday = sections["30분 이상 지연"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today]));
+  const delayToday = clampNeg(sections["30분 이상 지연"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])), "30분 이상 지연_Total");
+  const DELAY_TARGET_RATE = 0.03; // 완료건 대비 3% 목표
+  const delayRateToday = (completeToday!=null && completeToday>0) ? delayToday/completeToday : null;
+  const delayOverTarget = delayRateToday!=null && delayRateToday > DELAY_TARGET_RATE;
   const avgProcessToday = sections["상담처리율_%"]?.["AVG"]?.[today];
 
   // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
@@ -479,7 +496,8 @@ function render(data){
   const outcallDelta = (outcallWow.rate!=null && outcallToday.rate!=null) ? (outcallToday.rate - outcallWow.rate) : null;
 
   // 30분 이상 지연 WoW (Total 기준, 감소가 개선이므로 색상 반대로 적용)
-  const delayWow = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
+  const delayWowRaw = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
+  const delayWow = (delayWowRaw != null && delayWowRaw < 0) ? 0 : delayWowRaw;
   let delayDelta = null;
   let delayDeltaText = "전주 데이터 없음";
   let delayDeltaClass = "";
@@ -535,12 +553,15 @@ function render(data){
   // 카테고리별 이슈 (배송문의/배송클레임/서비스이용문의 등) 랭킹 + WoW + 주별 트렌드
   const issueSection = sections["카테고리별 이슈"] || {};
   const issueCategories = Object.keys(issueSection);
+  const issueTodayClamped = {}; // 중복 카운트 방지를 위해 카테고리별로 한 번만 클램프
+  issueCategories.forEach(c => { issueTodayClamped[c] = clampNeg(issueSection[c][today] || 0, `카테고리별 이슈 · ${c}`); });
   const issueTodayRanking = issueCategories
-    .map(c => ({ category:c, val: issueSection[c][today] || 0 }))
+    .map(c => ({ category:c, val: issueTodayClamped[c] }))
     .sort((a,b) => b.val - a.val);
   const issueWow = issueCategories.map(c => {
-    const t = issueSection[c][today] || 0;
-    const w = wowDate!=null ? (issueSection[c][wowDate] || 0) : null;
+    const t = issueTodayClamped[c];
+    const wRaw = wowDate!=null ? (issueSection[c][wowDate] || 0) : null;
+    const w = (wRaw != null && wRaw < 0) ? 0 : wRaw;
     const delta = (w!=null && w>0) ? (t-w)/w : null;
     return { category:c, today:t, wow:w, delta };
   });
@@ -598,9 +619,9 @@ function render(data){
   // 데이터 정합성 체크 (Total row vs 개별 합)
   const gapNote = [];
   if (totalRow){
-    const gap = (totalRow[today]||0) - inboundAgentsSum;
+    const gap = (totalRow[today]||0) - inboundAgentsSumRaw;
     if (Math.abs(gap) > 0){
-      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundAgentsSum)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
+      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundAgentsSumRaw)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
     }
   }
 
@@ -628,6 +649,11 @@ function render(data){
       insights.push(`오늘 30분 이상 지연이 가장 많은 상담원은 <b>${worst[0]}</b> (${worst[1]}건)입니다.`);
     } else {
       insights.push(`오늘 30분 이상 지연 건은 없습니다.`);
+    }
+    if (delayRateToday != null){
+      insights.push(delayOverTarget
+        ? `오늘 지연율은 완료건 대비 <b>${fmtPct(delayRateToday)}</b>로 목표(3%)를 초과했습니다.`
+        : `오늘 지연율은 완료건 대비 <b>${fmtPct(delayRateToday)}</b>로 목표(3%) 이내입니다.`);
     }
     if (outcall && outcall.categories?.length){
       const catRates = outcall.categories.map(c => {
@@ -691,6 +717,7 @@ function render(data){
       </div>
     </header>
     ${gapNote.length ? `<div class="banner">⚠️ ${gapNote.join(" ")}</div>` : ""}
+    ${dataAnomalies.length ? `<div class="banner">⚠️ 오늘(${today}) 데이터 중 ${dataAnomalies.length}개 지표가 음수로 확인되어 0으로 보정했습니다: ${dataAnomalies.join(" · ")}</div>` : ""}
 
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
@@ -705,7 +732,8 @@ function render(data){
       <div class="kpi"><div class="label">통화완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
-        <div class="delta ${delayDeltaClass}">${delayDeltaText}</div></div>
+        <div class="delta ${delayDeltaClass}">${delayDeltaText}</div>
+        <div class="delta" style="color:${delayRateToday==null?'var(--ink-dim)':(delayOverTarget?'var(--bad)':'var(--good)')};margin-top:2px;">${delayRateToday!=null ? `완료건 대비 ${fmtPct(delayRateToday)} (목표 3% ${delayOverTarget?'초과':'이내'})` : '완료건 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
         <div class="delta ${outcallDelta==null?'':(outcallDelta>=0?'up':'down')}">${outcallDelta!=null ? (outcallDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(outcallDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">평균 담당자별 인입</div><div class="val">${avgPerAgentToday!=null?avgPerAgentToday.toFixed(1):'-'}</div>
@@ -1176,6 +1204,9 @@ function buildAgentDetailHTML(agent){
     `;
   }
 
+  const agentDelayRate = (comp!=null && comp>0 && delay!=null) ? delay/comp : null;
+  const agentOverTarget = agentDelayRate!=null && agentDelayRate > 0.03;
+
   return `
     ${workStatus ? `<div style="margin-bottom:12px;font-size:12.5px;color:var(--ink-dim);">오늘 근무 상태: <span style="color:${OFF_STATUSES.includes(workStatus)?'var(--accent)':'var(--good)'};font-weight:600;">${workStatus}</span></div>` : ""}
     <div class="acc-kpis">
@@ -1184,6 +1215,7 @@ function buildAgentDetailHTML(agent){
       <div class="acc-kpi"><div class="l">처리율</div><div class="v">${fmtPct(procRate)}</div></div>
       <div class="acc-kpi"><div class="l">완료율</div><div class="v">${fmtPct(compRate)}</div></div>
       <div class="acc-kpi"><div class="l">30분 이상 지연</div><div class="v">${fmtNum(delay)}</div></div>
+      <div class="acc-kpi"><div class="l">지연율 (목표 3%)</div><div class="v" style="color:${agentDelayRate==null?'inherit':(agentOverTarget?'var(--bad)':'var(--good)')};">${agentDelayRate!=null ? fmtPct(agentDelayRate) : "-"}</div></div>
       <div class="acc-kpi"><div class="l">CPH</div><div class="v">${cph!=null ? fmtNum(cph) : "-"}</div></div>
       <div class="acc-kpi"><div class="l">근무일 기준 생산성</div><div class="v">${productivity!=null ? productivity.toFixed(1)+'건/일' : '-'}</div></div>
     </div>
