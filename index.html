@@ -294,6 +294,9 @@ function parseRawLog(text){
   const idx = {
     agent: header.indexOf("담당자"),
     createdAt: header.indexOf("createdAt"),
+    name: header.indexOf("name"),
+    state: header.indexOf("state"),
+    direction: header.indexOf("direction"),
   };
   const createdAtRe = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/;
   const out = [];
@@ -307,6 +310,9 @@ function parseRawLog(text){
       date: `${parseInt(m[2])}/${parseInt(m[3])}`,
       hour: parseInt(m[4]),
       agent: (row[idx.agent] || "").trim(),
+      store: idx.name>=0 ? (row[idx.name] || "").trim() : "",
+      state: idx.state>=0 ? (row[idx.state] || "").trim() : "",
+      direction: idx.direction>=0 ? (row[idx.direction] || "").trim() : "",
     });
   }
   return out;
@@ -359,6 +365,7 @@ function lastActiveDateIdx(dates, sections){
 function fmtPct(v){ return v==null ? "-" : Math.round(v*100) + "%"; }
 function fmtNum(v){ return v==null ? "-" : Math.round(v).toLocaleString(); }
 function sum(arr){ return arr.reduce((a,b)=>a+(b||0),0); }
+function clampPct(v){ return v==null ? null : Math.max(0, Math.min(1, v)); } // 0~100% 범위를 벗어난 이상치 값을 조용히 보정
 
 function lerpColor(hex1, hex2, t){
   const c1 = [1,3,5].map(i => parseInt(hex1.slice(i,i+2),16));
@@ -480,12 +487,12 @@ function render(data){
   const inboundToday = inboundAgentsSum; // 담당자(5명) 합산 기준 - Carol/송송/미배정 등은 제외
   const inboundYday = inboundYdayAgentsSum;
   const completeToday = clampNeg(sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])));
-  const completeRateToday = sections["상담완료율_%"]?.["Total"]?.[today];
+  const completeRateToday = clampPct(sections["상담완료율_%"]?.["Total"]?.[today]);
   const delayToday = clampNeg(sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])));
   const DELAY_TARGET_RATE = 0.03; // 완료건 대비 3% 목표
   const delayRateToday = (completeToday!=null && completeToday>0) ? delayToday/completeToday : null;
   const delayOverTarget = delayRateToday!=null && delayRateToday > DELAY_TARGET_RATE;
-  const avgProcessToday = sections["상담처리율_%"]?.["AVG"]?.[today];
+  const avgProcessToday = clampPct(sections["상담처리율_%"]?.["AVG"]?.[today]);
 
   // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
   const wowIdx = todayIdx - 7;
@@ -494,7 +501,7 @@ function render(data){
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
   // 통화완료율 WoW
-  const completeRateWow = wowDate!=null ? sections["상담완료율_%"]?.["Total"]?.[wowDate] : null;
+  const completeRateWow = wowDate!=null ? clampPct(sections["상담완료율_%"]?.["Total"]?.[wowDate]) : null;
   const completeRateDelta = (completeRateToday!=null && completeRateWow!=null) ? (completeRateToday - completeRateWow) : null;
 
   // 평균 담당자별 인입량 (개별 상담원 배정 건 기준 / 오늘 / 전주 동요일)
@@ -655,7 +662,7 @@ function render(data){
     if (outcall && outcall.categories?.length){
       const catRates = outcall.categories.map(c => {
         const t = outcall.data[c]?.["Total"];
-        const rate = t?.["통화완료_%"]?.[today];
+        const rate = clampPct(t?.["통화완료_%"]?.[today]);
         return [c, rate];
       }).filter(([,v]) => v!=null);
       if (catRates.length){
@@ -813,7 +820,7 @@ function render(data){
           ${(outcall.categories||[]).map(c => {
             const t = outcall.data[c]?.["Total"];
             const completed = t?.["통화완료"]?.[today] || 0;
-            const rate = t?.["통화완료_%"]?.[today];
+            const rate = clampPct(t?.["통화완료_%"]?.[today]);
             const surveyed = t?.["미처리"]?.[today] || 0;
             return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(completed)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtPct(rate)}</span></div>
               <div class="delta">통화완료율 · ${fmtNum(surveyed)}건 서베이발송(부재)</div></div>`;
@@ -839,7 +846,7 @@ function render(data){
         <h2>상담원별 상세 <span class="tag">이름을 클릭하면 펼쳐집니다</span></h2>
         ${agents.map(a => {
           const inb = sections["상담인입"][a][today] || 0;
-          const cr = sections["상담완료율_%"]?.[a]?.[today];
+          const cr = clampPct(sections["상담완료율_%"]?.[a]?.[today]);
           return `
           <div class="acc-item">
             <div class="acc-header" id="acc-header-${a}" onclick="toggleAgent('${a}')">
@@ -866,9 +873,9 @@ function render(data){
               const diff = t - y;
               const w = wowDate!=null ? (sections["상담인입"][a][wowDate] || 0) : null;
               const wowPct = (w!=null && w>0) ? ((t-w)/w) : null;
-              const cr = sections["상담완료율_%"]?.[a]?.[today];
+              const cr = clampPct(sections["상담완료율_%"]?.[a]?.[today]);
               const comp = sections["상담완료"]?.[a]?.[today] || 0;
-              const unprocessed = Math.max(0, t - comp);
+              const unprocessed = (rawLog||[]).filter(r => r.agent === a && r.date === today && r.direction === "INBOUND" && r.state.toLowerCase() !== "closed").length;
               const dl = sections["30분 이상 지연"]?.[a]?.[today] || 0;
               return `<tr><td>${a}</td><td>${fmtNum(y)}</td><td>${fmtNum(t)}</td>
                 <td style="color:${diff>=0?'var(--good)':'var(--bad)'}">${diff>=0?'+':''}${diff}</td>
@@ -908,7 +915,7 @@ function render(data){
   startCountdown();
 
   const maxCompletedToday = Math.max(1, ...agents.map(a => sections["상담완료"]?.[a]?.[today] || 0));
-  lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, maxCompletedToday };
+  lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, maxCompletedToday, rawLog };
   openAgentPanel = null;
   agentDetailChart = null;
 }
@@ -983,11 +990,12 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
       scales:{ x:{stacked:true, grid:{display:false}, ticks:{color:dateTickColor}}, y:{stacked:true, grid:{color:"#28324D"}} } }
   });
 
+  const isClosedDay = (d) => sum(agents.map(a => sections["상담인입"]?.[a]?.[d] || 0)) === 0;
   charts.rates = new Chart(document.getElementById("chartRates"), {
     type: "line",
     data: { labels: dateLabels, datasets: [
-      { label:"처리율(AVG)", data: dates.map(d=>{const v=sections["상담처리율_%"]?.["AVG"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#4C6EF5", tension:.3, pointRadius:2, spanGaps:true },
-      { label:"완료율(Total)", data: dates.map(d=>{const v=sections["상담완료율_%"]?.["Total"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#12B886", tension:.3, pointRadius:2, spanGaps:true }
+      { label:"처리율(AVG)", data: dates.map(d=>{ if (isClosedDay(d)) return null; const v=sections["상담처리율_%"]?.["AVG"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#4C6EF5", tension:.3, pointRadius:2, spanGaps:true },
+      { label:"완료율(Total)", data: dates.map(d=>{ if (isClosedDay(d)) return null; const v=sections["상담완료율_%"]?.["Total"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#12B886", tension:.3, pointRadius:2, spanGaps:true }
     ]},
     options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
       scales:{ y:{ min:0, max:100, ticks:{callback:v=>v+"%"}, grid:{color:"#28324D"} }, x:{grid:{display:false}, ticks:{color:dateTickColor}} } }
@@ -1181,16 +1189,17 @@ function toggleAgent(agent){
 }
 
 function buildAgentDetailHTML(agent){
-  const { sections, today, schedule, dates, delay30, delayHold, maxCompletedToday } = lastCtx;
+  const { sections, today, schedule, dates, delay30, delayHold, maxCompletedToday, rawLog } = lastCtx;
   const inb = sections["상담인입"]?.[agent]?.[today];
   const comp = sections["상담완료"]?.[agent]?.[today];
-  const procRate = sections["상담처리율_%"]?.[agent]?.[today];
-  const compRate = sections["상담완료율_%"]?.[agent]?.[today];
+  const procRate = clampPct(sections["상담처리율_%"]?.[agent]?.[today]);
+  const compRate = clampPct(sections["상담완료율_%"]?.[agent]?.[today]);
   const delay = sections["30분 이상 지연"]?.[agent]?.[today];
   const cph = sections["CPH(생산성)"]?.[agent]?.[today];
   const cast = sections["Cast(평점)"]?.[agent]?.[today];
   const workStatus = schedule?.schedule?.[agent]?.[today];
-  const unprocessed = (inb!=null && comp!=null) ? Math.max(0, inb - comp) : null;
+  const unprocessedTickets = (rawLog||[]).filter(r => r.agent === agent && r.date === today && r.direction === "INBOUND" && r.state.toLowerCase() !== "closed");
+  const unprocessed = unprocessedTickets.length;
 
   // 근무일 기반 생산성: 최근 기간 중 근무일수 대비 평균 처리 건수
   const workDays = dates.filter(d => {
@@ -1262,6 +1271,17 @@ function buildAgentDetailHTML(agent){
     ${subTable(delay30Rows, "해당 상담원의 30분 이상 지연 기록이 없습니다.")}
     <div style="margin-top:18px;font-size:13px;font-weight:600;">응대지연(2시간 이상) 상세</div>
     ${subTable(delayHoldRows, "해당 상담원의 2시간 이상 응대지연 기록이 없습니다.")}
+
+    <div style="margin-top:18px;font-size:13px;font-weight:600;">미처리 상세 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">(인바운드 · 미종결 건)</span></div>
+    ${unprocessedTickets.length ? `
+      <table style="font-size:12px;">
+        <thead><tr><th>사업장</th><th>상태</th><th>시간</th></tr></thead>
+        <tbody>
+          ${unprocessedTickets.slice(0,20).map(t => `<tr><td style="text-align:left;">${t.store||'-'}</td><td style="text-align:left;">${t.state||'-'}</td><td>${String(t.hour).padStart(2,'0')}시</td></tr>`).join("")}
+        </tbody>
+      </table>
+      ${unprocessedTickets.length > 20 ? `<div style="color:var(--ink-dim);font-size:11.5px;margin-top:6px;">전체 ${unprocessedTickets.length}건 중 20건 표시</div>` : ""}
+    ` : `<div style="color:var(--ink-dim);font-size:12px;padding:8px 0;">오늘 미처리 건이 없습니다.</div>`}
   `;
 }
 
