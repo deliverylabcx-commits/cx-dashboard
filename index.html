@@ -359,22 +359,29 @@ function render(data){
   const totalStaffToday = schedule?.totalStaff?.[today];
   const isUnderstaffed = issueToday === "정원 미달";
 
-  const inboundToday = sum(agents.map(a => sections["상담인입"][a][today]));
-  const inboundYday = sum(agents.map(a => sections["상담인입"][a][yday]));
+  const inboundAgentsSum = sum(agents.map(a => sections["상담인입"][a][today]));
+  const inboundYdayAgentsSum = sum(agents.map(a => sections["상담인입"][a][yday]));
+  const inboundToday = totalRow?.[today] ?? inboundAgentsSum;
+  const inboundYday = totalRow?.[yday] ?? inboundYdayAgentsSum;
   const completeToday = sections["상담완료"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["상담완료"]?.[a]?.[today]));
   const completeRateToday = sections["상담완료율_%"]?.["Total"]?.[today];
   const delayToday = sections["30분 이상 지연"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today]));
   const avgProcessToday = sections["상담처리율_%"]?.["AVG"]?.[today];
 
-  // WoW: 오늘 vs 7일 전 같은 요일
+  // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
   const wowIdx = todayIdx - 7;
   const wowDate = dates[wowIdx];
-  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
+  const inboundWow = wowDate!=null ? (totalRow?.[wowDate] ?? sum(agents.map(a=>sections["상담인입"][a][wowDate]))) : null;
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
-  // 평균 담당자별 인입량 (오늘 / 전주 동요일)
-  const avgPerAgentToday = agents.length ? inboundToday / agents.length : null;
-  const avgPerAgentWow = (inboundWow!=null && agents.length) ? inboundWow / agents.length : null;
+  // 통화완료율 WoW
+  const completeRateWow = wowDate!=null ? sections["상담완료율_%"]?.["Total"]?.[wowDate] : null;
+  const completeRateDelta = (completeRateToday!=null && completeRateWow!=null) ? (completeRateToday - completeRateWow) : null;
+
+  // 평균 담당자별 인입량 (개별 상담원 배정 건 기준 / 오늘 / 전주 동요일)
+  const inboundAgentsWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
+  const avgPerAgentToday = agents.length ? inboundAgentsSum / agents.length : null;
+  const avgPerAgentWow = (inboundAgentsWow!=null && agents.length) ? inboundAgentsWow / agents.length : null;
   const avgPerAgentDelta = (avgPerAgentWow!=null && avgPerAgentWow>0) ? ((avgPerAgentToday-avgPerAgentWow)/avgPerAgentWow) : null;
 
   // 아웃콜 완료율 (오늘 / 전주 동요일) - 전 카테고리 합산 가중평균
@@ -450,9 +457,9 @@ function render(data){
   // 데이터 정합성 체크 (Total row vs 개별 합)
   const gapNote = [];
   if (totalRow){
-    const gap = (totalRow[today]||0) - inboundToday;
+    const gap = (totalRow[today]||0) - inboundAgentsSum;
     if (Math.abs(gap) > 0){
-      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundToday)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
+      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundAgentsSum)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
     }
   }
 
@@ -491,6 +498,18 @@ function render(data){
         const bestCat = catRates.reduce((a,b) => b[1]>a[1] ? b : a);
         insights.push(`아웃콜 카테고리 중 완료율이 가장 높은 항목은 <b>${bestCat[0]}</b> (${fmtPct(bestCat[1])})입니다.`);
       }
+      const unprocessed = outcall.categories.map(c => {
+        const t = outcall.data[c]?.["Total"];
+        return [c, t?.["미처리"]?.[today]];
+      }).filter(([,v]) => v!=null && v>0);
+      if (unprocessed.length){
+        const worstUnprocessed = unprocessed.reduce((a,b) => b[1]>a[1] ? b : a);
+        insights.push(`아웃콜 미처리가 가장 많은 카테고리는 <b>${worstUnprocessed[0]}</b> (${worstUnprocessed[1]}건)입니다.`);
+      }
+    }
+    const inboundRanking = agents.map(a => [a, sections["상담인입"][a][today] || 0]).sort((x,y) => y[1]-x[1]);
+    if (inboundRanking.length && inboundRanking[0][1] > 0){
+      insights.push(`오늘 인입이 가장 많은 상담원은 <b>${inboundRanking[0][0]}</b> (${fmtNum(inboundRanking[0][1])}건)입니다.`);
     }
     if (isUnderstaffed){
       insights.push(`오늘은 <b>정원 미달</b> 상태입니다 (근무 ${totalStaffToday}명 / 최소 ${minStaffToday}명).`);
@@ -528,8 +547,8 @@ function render(data){
     <div class="kpis">
       <div class="kpi"><div class="label">${today} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
         <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
-      <div class="kpi"><div class="label">완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
-        <div class="delta">평균 처리율 ${fmtPct(avgProcessToday)}</div></div>
+      <div class="kpi"><div class="label">통화완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
+        <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
         <div class="delta ${delayDeltaClass}">${delayDeltaText}</div></div>
       <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
@@ -626,18 +645,21 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>일별 상세 (DoD) <span class="tag">${yday} → ${today}</span></h2>
+        <h2>일별 상세 (DoD) <span class="tag">${yday} → ${today} · WoW는 전주 동요일(${wowDate||'-'}) 대비</span></h2>
         <table>
-          <thead><tr><th>상담원</th><th>${yday} 인입</th><th>${today} 인입</th><th>증감</th><th>완료율</th><th>지연</th></tr></thead>
+          <thead><tr><th>상담원</th><th>${yday} 인입</th><th>${today} 인입</th><th>증감(DoD)</th><th>WoW</th><th>완료율</th><th>지연</th></tr></thead>
           <tbody>
             ${agents.map(a => {
               const y = sections["상담인입"][a][yday] || 0;
               const t = sections["상담인입"][a][today] || 0;
               const diff = t - y;
+              const w = wowDate!=null ? (sections["상담인입"][a][wowDate] || 0) : null;
+              const wowPct = (w!=null && w>0) ? ((t-w)/w) : null;
               const cr = sections["상담완료율_%"]?.[a]?.[today];
               const dl = sections["30분 이상 지연"]?.[a]?.[today] || 0;
               return `<tr><td>${a}</td><td>${fmtNum(y)}</td><td>${fmtNum(t)}</td>
-                <td class="${diff>=0?'up':'down'}" style="color:${diff>=0?'var(--good)':'var(--bad)'}">${diff>=0?'+':''}${diff}</td>
+                <td style="color:${diff>=0?'var(--good)':'var(--bad)'}">${diff>=0?'+':''}${diff}</td>
+                <td style="color:${wowPct==null?'var(--ink-dim)':(wowPct>=0?'var(--good)':'var(--bad)')}">${wowPct!=null ? (wowPct>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowPct*100))+'%' : (w===0?`0건→${t}건`:'-')}</td>
                 <td>${fmtPct(cr)}</td><td>${fmtNum(dl)}</td></tr>`;
             }).join("")}
           </tbody>
