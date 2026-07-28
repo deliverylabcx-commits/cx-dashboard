@@ -354,11 +354,12 @@ function lerpColor(hex1, hex2, t){
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-function buildHeatmapHTML(counts, max, weekdayLabels){
+function buildHeatmapHTML(counts, max, rowLabels, labelWidth){
+  labelWidth = labelWidth || 28;
   const cellW = 34;
   const hourHeader = Array.from({length:24}, (_,h) => `<div style="width:${cellW}px;text-align:center;font-size:10px;color:var(--ink-dim);flex-shrink:0;">${h}</div>`).join("");
-  const rows = weekdayLabels.map((label, wd) => {
-    const cells = counts[wd].map(v => {
+  const rows = rowLabels.map((label, ri) => {
+    const cells = counts[ri].map(v => {
       const t = max>0 ? v/max : 0;
       const bg = v>0 ? lerpColor("#241B3A","#8B5CF6", Math.min(1, 0.15+t*0.85)) : "transparent";
       const fg = t>0.55 ? "#fff" : (v>0 ? "#D9D2F0" : "var(--ink-dim)");
@@ -367,15 +368,15 @@ function buildHeatmapHTML(counts, max, weekdayLabels){
       </div>`;
     }).join("");
     return `<div style="display:flex;align-items:center;gap:0;">
-      <div style="width:28px;flex-shrink:0;font-size:11px;color:var(--ink-dim);">${label}</div>
+      <div style="width:${labelWidth}px;flex-shrink:0;font-size:11px;color:var(--ink-dim);">${label}</div>
       ${cells}
     </div>`;
   }).join("");
   return `
     <div style="overflow-x:auto;padding-bottom:6px;">
-      <div style="min-width:${28+cellW*24}px;">
+      <div style="min-width:${labelWidth+cellW*24}px;">
         <div style="display:flex;align-items:center;gap:0;margin-bottom:4px;">
-          <div style="width:28px;flex-shrink:0;"></div>
+          <div style="width:${labelWidth}px;flex-shrink:0;"></div>
           ${hourHeader}
         </div>
         ${rows}
@@ -584,6 +585,16 @@ function render(data){
     if (diff > spikeDiff){ spikeDiff = diff; spikeHour = h; }
   });
 
+  // 일별(날짜별) 시간대 히트맵 - 최근일이 맨 위로 오도록 정렬
+  const dailyLabels = [...recentDates].reverse();
+  const dailyHeatmapCounts = dailyLabels.map(() => new Array(24).fill(0));
+  const dailyDateIndex = new Map(dailyLabels.map((d,i) => [d,i]));
+  (rawLog||[]).forEach(r => {
+    const idx = dailyDateIndex.get(r.date);
+    if (idx != null) dailyHeatmapCounts[idx][r.hour]++;
+  });
+  const dailyHeatmapMax = Math.max(1, ...dailyHeatmapCounts.flat());
+
   // 데이터 정합성 체크 (Total row vs 개별 합)
   const gapNote = [];
   if (totalRow){
@@ -718,6 +729,13 @@ function render(data){
       <div class="card">
         <h2>요일 및 시간별 인입된 상담 수 <span class="tag">최근 ${daysWithData}일 합계 · RAW 로그 createdAt 기준</span></h2>
         ${buildHeatmapHTML(heatmapCounts, heatmapMax, WEEKDAY_LABELS)}
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>일별 시간대별 인입 <span class="tag">최근 ${dailyLabels.length}일 · 최신일이 맨 위</span></h2>
+        ${buildHeatmapHTML(dailyHeatmapCounts, dailyHeatmapMax, dailyLabels, 40)}
       </div>
     </div>
 
