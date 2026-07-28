@@ -114,6 +114,8 @@ function parseCSV(text){
   const sections = {};
   let totalRow = null;
   let currentSection = null;
+  const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8 }; // 이 섹션은 정확히 8개 카테고리로 끝남 - 이후 행(예: WOW 델타 등)이 같은 라벨을 재사용해도 오염되지 않도록 위치 기반으로 차단
+  let sectionRowCount = 0;
 
   for (let r = HEADER_ROW + 1; r < rows.length; r++){
     const row = rows[r];
@@ -127,14 +129,21 @@ function parseCSV(text){
       continue;
     }
     if (col1){
-      if (KNOWN_SECTIONS.includes(col1)) currentSection = col1;
-      else if (col1 !== "완료건 대비 3%") currentSection = null; // 알려진 주석 행("완료건 대비 3%")은 무시하고 유지, 그 외 미확인 라벨은 새 섹션 시작으로 간주해 이전 섹션 오염 방지
+      if (KNOWN_SECTIONS.includes(col1)){ currentSection = col1; sectionRowCount = 0; }
+      else if (col1 !== "완료건 대비 3%") currentSection = null; // 알려진 주석 행은 무시, 그 외 미확인 라벨은 새 섹션 시작으로 간주
     }
     if (!currentSection || !col2) continue;
+
+    const limit = SECTION_ROW_LIMITS[currentSection];
+    if (limit != null && sectionRowCount >= limit){
+      currentSection = null; // 정해진 행 수를 넘어서면 이후 같은 라벨의 다른 섹션(WOW 델타 등)으로 간주해 더 이상 수집하지 않음
+      continue;
+    }
 
     sections[currentSection] = sections[currentSection] || {};
     sections[currentSection][col2] = {};
     dateCols.forEach(({col,date}) => { sections[currentSection][col2][date] = toNum(row[col]); });
+    if (limit != null) sectionRowCount++;
   }
 
   return { dates: dateCols.map(d=>d.date), sections, totalRow };
