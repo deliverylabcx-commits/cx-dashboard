@@ -878,7 +878,7 @@ function render(data){
     </div>
   `;
 
-  document.getElementById("refreshBtn").onclick = () => refresh(true);
+  document.getElementById("refreshBtn").onclick = () => { refresh(true); refreshRawLog(); };
 
   drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys });
   startCountdown();
