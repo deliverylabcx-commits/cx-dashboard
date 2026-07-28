@@ -81,11 +81,13 @@ const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTjti7
 const OUTCALL_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=25550252&single=true&output=csv";
 const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1307884512&single=true&output=csv";
 const DELAYHOLD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=634573420&single=true&output=csv";
+const RAWLOG_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=0&single=true&output=csv";
 const SCHEDULE_NAME_MAP = { Sense: "Zenze", Maru: "maru" }; // 스케줄 시트 표기 → CS_Tracking 표기로 정규화
 const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무"]; // 근무 아닌 상태로 취급
-const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신
+const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아웃콜/지연 시트)
+const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
-const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)"];
+const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC" };
 const AGENT_ORDER = ["Punisher","maru","Zenze","Tsuna","Hugo","Carol"];
 
@@ -269,6 +271,34 @@ function parseDelayRows(text){
   return out;
 }
 
+/* ===================== 원본 이벤트 로그 파싱 (시간대별 인입 분석용) ===================== */
+function parseRawLog(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const headerIdx = rows.findIndex(r => r.includes("createdAt"));
+  if (headerIdx < 0) return [];
+  const header = rows[headerIdx].map(h => (h||"").trim());
+  const idx = {
+    agent: header.indexOf("담당자"),
+    createdAt: header.indexOf("createdAt"),
+  };
+  const createdAtRe = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/;
+  const out = [];
+  for (let r = headerIdx + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row) continue;
+    const raw = (row[idx.createdAt] || "").trim();
+    const m = raw.match(createdAtRe);
+    if (!m) continue;
+    out.push({
+      date: `${parseInt(m[2])}/${parseInt(m[3])}`,
+      hour: parseInt(m[4]),
+      agent: (row[idx.agent] || "").trim(),
+    });
+  }
+  return out;
+}
+
 /* ===================== 데이터 로드 ===================== */
 async function fetchCSV(url){
   const res = await fetch(url, { cache: "no-store" });
@@ -276,7 +306,7 @@ async function fetchCSV(url){
   return res.text();
 }
 
-async function loadData(){
+async function loadMainData(){
   const csText = await fetchCSV(CSV_URL);
   let schedule = { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} };
   let outcall = { dates: [], categories: [], data: {} };
@@ -298,6 +328,11 @@ async function loadData(){
   return { ...parseCSV(csText), schedule, outcall, delay30, delayHold };
 }
 
+async function loadRawLog(){
+  try { return parseRawLog(await fetchCSV(RAWLOG_CSV_URL)); }
+  catch(e){ console.warn("RAW 로그 시트를 불러오지 못했습니다 (시간대별 분석 제외):", e.message); return []; }
+}
+
 /* ===================== 유틸 ===================== */
 function lastActiveDateIdx(dates, sections){
   // 그날 최소 한 명이라도 상담인입이 있으면 "활동일"로 간주 (일요일 등 휴무일 제외)
@@ -311,6 +346,48 @@ function lastActiveDateIdx(dates, sections){
 function fmtPct(v){ return v==null ? "-" : Math.round(v*100) + "%"; }
 function fmtNum(v){ return v==null ? "-" : Math.round(v).toLocaleString(); }
 function sum(arr){ return arr.reduce((a,b)=>a+(b||0),0); }
+
+function lerpColor(hex1, hex2, t){
+  const c1 = [1,3,5].map(i => parseInt(hex1.slice(i,i+2),16));
+  const c2 = [1,3,5].map(i => parseInt(hex2.slice(i,i+2),16));
+  const c = c1.map((v,i) => Math.round(v + (c2[i]-v)*t));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function buildHeatmapHTML(counts, max, weekdayLabels){
+  const cellW = 34;
+  const hourHeader = Array.from({length:24}, (_,h) => `<div style="width:${cellW}px;text-align:center;font-size:10px;color:var(--ink-dim);flex-shrink:0;">${h}</div>`).join("");
+  const rows = weekdayLabels.map((label, wd) => {
+    const cells = counts[wd].map(v => {
+      const t = max>0 ? v/max : 0;
+      const bg = v>0 ? lerpColor("#241B3A","#8B5CF6", Math.min(1, 0.15+t*0.85)) : "transparent";
+      const fg = t>0.55 ? "#fff" : (v>0 ? "#D9D2F0" : "var(--ink-dim)");
+      return `<div style="width:${cellW}px;height:26px;flex-shrink:0;display:flex;align-items:center;justify-content:center;">
+        <div style="width:28px;height:22px;border-radius:6px;background:${bg};color:${fg};font-size:10.5px;display:flex;align-items:center;justify-content:center;">${v>0?v:'·'}</div>
+      </div>`;
+    }).join("");
+    return `<div style="display:flex;align-items:center;gap:0;">
+      <div style="width:28px;flex-shrink:0;font-size:11px;color:var(--ink-dim);">${label}</div>
+      ${cells}
+    </div>`;
+  }).join("");
+  return `
+    <div style="overflow-x:auto;padding-bottom:6px;">
+      <div style="min-width:${28+cellW*24}px;">
+        <div style="display:flex;align-items:center;gap:0;margin-bottom:4px;">
+          <div style="width:28px;flex-shrink:0;"></div>
+          ${hourHeader}
+        </div>
+        ${rows}
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:11px;color:var(--ink-dim);">
+      <span>0</span>
+      <div style="width:80px;height:8px;border-radius:4px;background:linear-gradient(90deg, ${lerpColor("#241B3A","#8B5CF6",0.15)}, #8B5CF6);"></div>
+      <span>${max}</span>
+    </div>
+  `;
+}
 
 const DATA_YEAR = 2026; // 날짜 문자열(M/D)에는 연도가 없어 대시보드가 다루는 2026년으로 고정
 function mdToISO(md){
@@ -333,7 +410,7 @@ function resetToLatest(){
 
 /* ===================== 렌더 ===================== */
 function render(data){
-  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold } = data;
+  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold, rawLog } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
 
   let todayIdx;
@@ -454,6 +531,59 @@ function render(data){
     return (am*100+ad) - (bm*100+bd);
   });
 
+  // 카테고리별 이슈 (배송문의/배송클레임/서비스이용문의 등) 랭킹 + WoW + 주별 트렌드
+  const issueSection = sections["카테고리별 이슈"] || {};
+  const issueCategories = Object.keys(issueSection);
+  const issueTodayRanking = issueCategories
+    .map(c => ({ category:c, val: issueSection[c][today] || 0 }))
+    .sort((a,b) => b.val - a.val);
+  const issueWow = issueCategories.map(c => {
+    const t = issueSection[c][today] || 0;
+    const w = wowDate!=null ? (issueSection[c][wowDate] || 0) : null;
+    const delta = (w!=null && w>0) ? (t-w)/w : null;
+    return { category:c, today:t, wow:w, delta };
+  });
+  const weeklyByIssue = {}; // category -> weekKey -> count
+  issueCategories.forEach(c => { weeklyByIssue[c] = {}; });
+  dates.forEach(d => {
+    const wk = weekKeyOf(d);
+    issueCategories.forEach(c => {
+      weeklyByIssue[c][wk] = (weeklyByIssue[c][wk] || 0) + (issueSection[c][d] || 0);
+    });
+  });
+  const issueWeekKeys = [...new Set(dates.map(weekKeyOf))].sort((a,b) => {
+    const [am,ad] = a.split("/").map(Number), [bm,bd] = b.split("/").map(Number);
+    return (am*100+ad) - (bm*100+bd);
+  });
+
+  // 시간대별 인입 분포 (오늘 / 최근 14일 평균) - RAW 로그의 createdAt 기준
+  const recentDatesSet = new Set(recentDates);
+  const hourlyToday = new Array(24).fill(0);
+  const hourly2wSum = new Array(24).fill(0);
+  const daysWithDataSet = new Set();
+  const WEEKDAY_LABELS = ["일","월","화","수","목","금","토"];
+  const heatmapCounts = Array.from({length:7}, () => new Array(24).fill(0));
+  (rawLog||[]).forEach(r => {
+    if (r.date === today) hourlyToday[r.hour]++;
+    if (recentDatesSet.has(r.date)){
+      hourly2wSum[r.hour]++;
+      daysWithDataSet.add(r.date);
+      const [m,d] = r.date.split("/").map(Number);
+      const wd = new Date(DATA_YEAR, m-1, d).getDay();
+      heatmapCounts[wd][r.hour]++;
+    }
+  });
+  const daysWithData = daysWithDataSet.size || 1;
+  const hourly2wAvg = hourly2wSum.map(v => v/daysWithData);
+  const peakHourToday = hourlyToday.indexOf(Math.max(...hourlyToday));
+  const peakHour2w = hourly2wAvg.indexOf(Math.max(...hourly2wAvg));
+  const heatmapMax = Math.max(1, ...heatmapCounts.flat());
+  let spikeHour = -1, spikeDiff = 0;
+  hourlyToday.forEach((v,h) => {
+    const diff = v - hourly2wAvg[h];
+    if (diff > spikeDiff){ spikeDiff = diff; spikeHour = h; }
+  });
+
   // 데이터 정합성 체크 (Total row vs 개별 합)
   const gapNote = [];
   if (totalRow){
@@ -514,6 +644,20 @@ function render(data){
     if (isUnderstaffed){
       insights.push(`오늘은 <b>정원 미달</b> 상태입니다 (근무 ${totalStaffToday}명 / 최소 ${minStaffToday}명).`);
     }
+    if (issueTodayRanking.length && issueTodayRanking[0].val > 0){
+      insights.push(`오늘 가장 많이 발생한 이슈 카테고리는 <b>${issueTodayRanking[0].category}</b> (${fmtNum(issueTodayRanking[0].val)}건)입니다.`);
+    }
+    const risingIssues = issueWow.filter(x => x.delta!=null && x.delta>0).sort((a,b)=>b.delta-a.delta);
+    if (risingIssues.length){
+      const r = risingIssues[0];
+      insights.push(`전주 동요일 대비 가장 많이 증가한 이슈는 <b>${r.category}</b> (▲ ${Math.round(r.delta*100)}%)입니다.`);
+    }
+    if (peakHour2w >= 0 && hourly2wAvg[peakHour2w] > 0){
+      insights.push(`최근 ${daysWithData}일 평균 기준 인입이 가장 몰리는 시간대는 <b>${peakHour2w}시</b>입니다 (평균 ${hourly2wAvg[peakHour2w].toFixed(1)}건).`);
+    }
+    if (spikeHour >= 0 && spikeDiff >= 1){
+      insights.push(`오늘은 평소보다 <b>${spikeHour}시</b>에 인입이 유독 많았습니다 (오늘 ${hourlyToday[spikeHour]}건 · 평균 ${hourly2wAvg[spikeHour].toFixed(1)}건).`);
+    }
   }
 
   if (agentDetailChart){ agentDetailChart.destroy(); agentDetailChart = null; }
@@ -570,6 +714,13 @@ function render(data){
       </div>
     </div>
 
+    <div class="grid1">
+      <div class="card">
+        <h2>요일 및 시간별 인입된 상담 수 <span class="tag">최근 ${daysWithData}일 합계 · RAW 로그 createdAt 기준</span></h2>
+        ${buildHeatmapHTML(heatmapCounts, heatmapMax, WEEKDAY_LABELS)}
+      </div>
+    </div>
+
     <div class="grid2">
       <div class="card">
         <h2>상담원별 인입 (일별 누적) <span class="tag">최근 ${recentDates.length}일</span></h2>
@@ -590,6 +741,26 @@ function render(data){
         <h2>CPH(생산성) <span class="tag">상담원별 · 최근 ${recentDates.length}일 평균</span></h2>
         <canvas id="chartCPH"></canvas>
         <div id="cphBelowAvgNote" style="margin-top:10px;font-size:12px;color:var(--ink-dim);"></div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>카테고리별 이슈 <span class="tag">TOP 티어 · ${today}</span></h2>
+        <div class="kpis" style="margin-bottom:16px;">
+          ${issueWow.slice().sort((a,b)=>b.today-a.today).map(x => {
+            return `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.today)}</div>
+              <div class="delta ${x.delta==null?'':(x.delta<=0?'up':'down')}">${x.delta!=null ? (x.delta<=0?'▼ ':'▲ ')+Math.abs(Math.round(x.delta*100))+'% (전주 동요일 대비)' : (x.wow===0?`전주 0건 → 금주 ${x.today}건`:'전주 데이터 없음')}</div></div>`;
+          }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">카테고리별 이슈 데이터 없음</div>'}
+        </div>
+        <canvas id="chartIssueRank"></canvas>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>카테고리별 이슈 주별 트렌드 <span class="tag">주간 랭킹 추이</span></h2>
+        <canvas id="chartIssueWeekly"></canvas>
       </div>
     </div>
 
@@ -691,7 +862,7 @@ function render(data){
 
   document.getElementById("refreshBtn").onclick = () => refresh(true);
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory });
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys });
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold };
@@ -704,7 +875,7 @@ function destroyCharts(){
   charts = {};
 }
 
-function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
@@ -880,6 +1051,50 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
         scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
     });
   }
+
+  const issueRankCanvas = document.getElementById("chartIssueRank");
+  if (issueRankCanvas && issueTodayRanking?.length){
+    const TIER_COLORS = ["#E8A33D","#C9CDD6","#B08D57"];
+    const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC","#20C997","#845EF7"];
+    charts.issueRank = new Chart(issueRankCanvas, {
+      type: "bar",
+      data: {
+        labels: issueTodayRanking.map((r,i) => `${i+1}위 ${r.category}`),
+        datasets: [{
+          data: issueTodayRanking.map(r => r.val),
+          backgroundColor: issueTodayRanking.map((r,i) => i<3 ? TIER_COLORS[i] : palette[i % palette.length]+"AA"),
+          borderRadius: 4
+        }]
+      },
+      options: {
+        indexAxis: "y",
+        plugins: { legend: { display:false } },
+        scales: { x:{ grid:{color:"#28324D"} }, y:{ grid:{display:false} } }
+      }
+    });
+  }
+
+  const issueWeeklyCanvas = document.getElementById("chartIssueWeekly");
+  if (issueWeeklyCanvas && issueWeekKeys?.length && weeklyByIssue){
+    const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC","#20C997","#845EF7"];
+    const cats = Object.keys(weeklyByIssue);
+    charts.issueWeekly = new Chart(issueWeeklyCanvas, {
+      type: "line",
+      data: {
+        labels: issueWeekKeys.map(w => `${w} 주`),
+        datasets: cats.map((c,i) => ({
+          label: c,
+          data: issueWeekKeys.map(w => weeklyByIssue[c][w] ?? 0),
+          borderColor: palette[i % palette.length],
+          backgroundColor: palette[i % palette.length],
+          tension: .3,
+          pointRadius: 3
+        }))
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"이슈 건수",font:{size:10}} } } }
+    });
+  }
 }
 
 /* ===================== 상담원별 상세 아코디언 ===================== */
@@ -1017,16 +1232,31 @@ function startCountdown(){
 
 async function refresh(manual){
   try{
-    const data = await loadData();
-    lastLoadedData = data;
-    render(data);
+    const main = await loadMainData();
+    const rawLog = lastLoadedData?.rawLog || [];
+    lastLoadedData = { ...main, rawLog };
+    render(lastLoadedData);
   }catch(e){
     console.error(e);
     if (manual) alert("데이터를 불러오지 못했습니다: " + e.message);
   }
 }
 
-refresh(true);
+async function refreshRawLog(){
+  const rawLog = await loadRawLog();
+  if (lastLoadedData){
+    lastLoadedData.rawLog = rawLog;
+    render(lastLoadedData);
+  }
+}
+
+async function initialLoad(){
+  await refresh(true);
+  await refreshRawLog(); // RAW 로그(6MB+)는 최초 1회만 함께 로드, 이후 30분 주기로 별도 갱신
+  setInterval(refreshRawLog, RAWLOG_REFRESH_MS);
+}
+
+initialLoad();
 </script>
 </body>
 </html>
