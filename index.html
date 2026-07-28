@@ -128,6 +128,7 @@ function parseCSV(text){
       dateCols.forEach(({col,date}) => { totalRow[date] = toNum(row[col]); });
       continue;
     }
+    if (/wow/i.test(col1)) break; // WOW_Tarcking 부속 섹션은 상담인입/30분 이상 지연/카테고리별 이슈 라벨을 재사용해 델타값을 적어두므로, 여기부터는 파싱을 완전히 중단해 실제 데이터가 델타값으로 덮어써지는 것을 막는다
     if (col1){
       if (KNOWN_SECTIONS.includes(col1)){ currentSection = col1; sectionRowCount = 0; }
       else if (col1 !== "완료건 대비 3%") currentSection = null; // 알려진 주석 행은 무시, 그 외 미확인 라벨은 새 섹션 시작으로 간주
@@ -403,9 +404,31 @@ function buildHeatmapHTML(counts, max, rowLabels, labelWidth){
 }
 
 const DATA_YEAR = 2026; // 날짜 문자열(M/D)에는 연도가 없어 대시보드가 다루는 2026년으로 고정
+const WEEKDAY_KO = ["일","월","화","수","목","금","토"];
+function weekdayOf(md){
+  const [m,d] = md.split("/").map(Number);
+  return new Date(DATA_YEAR, m-1, d).getDay(); // 0=일 ... 6=토
+}
+function dateLabel(md, opts){
+  // opts.html=true면 일요일을 빨간색으로 강조한 span 마크업 반환, 아니면 순수 텍스트
+  if (!md) return "-";
+  const wd = weekdayOf(md);
+  const isSun = wd === 0;
+  const text = `${md}(${WEEKDAY_KO[wd]})`;
+  if (opts && opts.html){
+    return isSun ? `<span style="color:var(--bad);font-weight:600;">${text}</span>` : text;
+  }
+  return text;
+}
 function mdToISO(md){
   const [m,d] = md.split("/").map(Number);
   return `${DATA_YEAR}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+}
+function addDaysMD(md, n){
+  const [m,d] = md.split("/").map(Number);
+  const dt = new Date(DATA_YEAR, m-1, d);
+  dt.setDate(dt.getDate()+n);
+  return `${dt.getMonth()+1}/${dt.getDate()}`;
 }
 function isoToMD(iso){
   const [,m,d] = iso.split("-").map(Number);
@@ -441,7 +464,7 @@ function render(data){
   const N = 14;
   const start = Math.max(0, todayIdx - N + 1);
   const recentDates = dates.slice(start, todayIdx + 1);
-  const weekDates = recentDates.slice(-7);
+  const weekDates = [-2,-1,0,1,2,3,4,5].map(n => addDaysMD(today, n)); // 근무 스케줄: D-2 ~ D+5
 
   // 스케줄 정보 (오늘 기준)
   const issueToday = schedule?.issueStatus?.[today];
@@ -449,24 +472,16 @@ function render(data){
   const totalStaffToday = schedule?.totalStaff?.[today];
   const isUnderstaffed = issueToday === "정원 미달";
 
-  // 음수 이상치 방어: 진행 중인 당일(오늘) 컬럼은 시트 갱신 타이밍에 따라 일시적으로 음수가 나올 수 있음
-  const dataAnomalies = [];
-  function clampNeg(raw, label){
-    if (raw != null && raw < 0){
-      dataAnomalies.push(`${label}: 원본값 ${fmtNum(raw)} (음수) → 0으로 보정`);
-      return 0;
-    }
-    return raw;
-  }
+  // 음수 이상치는 조용히 0으로 보정 (경영진 화면이라 경고 문구는 노출하지 않음)
+  function clampNeg(raw){ return (raw != null && raw < 0) ? 0 : raw; }
 
-  const inboundAgentsSumRaw = sum(agents.map(a => sections["상담인입"][a][today]));
-  const inboundAgentsSum = clampNeg(inboundAgentsSumRaw, "상담인입 합계");
+  const inboundAgentsSum = clampNeg(sum(agents.map(a => sections["상담인입"][a][today])));
   const inboundYdayAgentsSum = sum(agents.map(a => sections["상담인입"][a][yday]));
-  const inboundToday = clampNeg(totalRow?.[today] ?? inboundAgentsSum, "상담인입_Total");
-  const inboundYday = totalRow?.[yday] ?? inboundYdayAgentsSum;
-  const completeToday = clampNeg(sections["상담완료"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])), "상담완료_Total");
+  const inboundToday = inboundAgentsSum; // 담당자(5명) 합산 기준 - Carol/송송/미배정 등은 제외
+  const inboundYday = inboundYdayAgentsSum;
+  const completeToday = clampNeg(sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])));
   const completeRateToday = sections["상담완료율_%"]?.["Total"]?.[today];
-  const delayToday = clampNeg(sections["30분 이상 지연"]?.["Total"]?.[today] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])), "30분 이상 지연_Total");
+  const delayToday = clampNeg(sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])));
   const DELAY_TARGET_RATE = 0.03; // 완료건 대비 3% 목표
   const delayRateToday = (completeToday!=null && completeToday>0) ? delayToday/completeToday : null;
   const delayOverTarget = delayRateToday!=null && delayRateToday > DELAY_TARGET_RATE;
@@ -475,7 +490,7 @@ function render(data){
   // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
   const wowIdx = todayIdx - 7;
   const wowDate = dates[wowIdx];
-  const inboundWow = wowDate!=null ? (totalRow?.[wowDate] ?? sum(agents.map(a=>sections["상담인입"][a][wowDate]))) : null;
+  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
   // 통화완료율 WoW
@@ -501,8 +516,10 @@ function render(data){
     return { rate: inbound>0 ? completed/inbound : null, inbound, completed };
   }
   const outcallToday = outcallCompletionRate(today);
-  const outcallWow = wowDate!=null ? outcallCompletionRate(wowDate) : { rate:null };
-  const outcallDelta = (outcallWow.rate!=null && outcallToday.rate!=null) ? (outcallToday.rate - outcallWow.rate) : null;
+
+  // 팀원당 평균 지표
+  const avgCompletePerAgent = agents.length ? completeToday/agents.length : null;
+  const avgOutcallPerAgent = agents.length ? outcallToday.completed/agents.length : null;
 
   // 30분 이상 지연 WoW (Total 기준, 감소가 개선이므로 색상 반대로 적용)
   const delayWowRaw = wowDate!=null ? (sections["30분 이상 지연"]?.["Total"]?.[wowDate] ?? sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[wowDate]))) : null;
@@ -520,18 +537,6 @@ function render(data){
       delayDeltaClass = delayDelta<=0 ? "up" : "down";
     }
   }
-
-  // 아웃콜 카테고리별 WoW 완료율
-  function catRateAt(cat, date){
-    const t = outcall.data[cat]?.["Total"];
-    return t?.["통화완료_%"]?.[date] ?? null;
-  }
-  const categoryWow = (outcall.categories||[]).map(c => {
-    const todayRate = catRateAt(c, today);
-    const wowRate = wowDate!=null ? catRateAt(c, wowDate) : null;
-    const delta = (todayRate!=null && wowRate!=null) ? todayRate - wowRate : null;
-    return { category:c, todayRate, wowRate, delta };
-  });
 
   // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위, 카테고리별 집계)
   function weekKeyOf(md){
@@ -563,7 +568,7 @@ function render(data){
   const issueSection = sections["카테고리별 이슈"] || {};
   const issueCategories = Object.keys(issueSection);
   const issueTodayClamped = {}; // 중복 카운트 방지를 위해 카테고리별로 한 번만 클램프
-  issueCategories.forEach(c => { issueTodayClamped[c] = clampNeg(issueSection[c][today] || 0, `카테고리별 이슈 · ${c}`); });
+  issueCategories.forEach(c => { issueTodayClamped[c] = clampNeg(issueSection[c][today] || 0); });
   const issueTodayRanking = issueCategories
     .map(c => ({ category:c, val: issueTodayClamped[c] }))
     .sort((a,b) => b.val - a.val);
@@ -587,52 +592,35 @@ function render(data){
     return (am*100+ad) - (bm*100+bd);
   });
 
-  // 시간대별 인입 분포 (오늘 / 최근 14일 평균) - RAW 로그의 createdAt 기준
+  // 시간대별 인입 분포 (오늘 / 최근 기간 평균) - RAW 로그의 createdAt 기준
   const recentDatesSet = new Set(recentDates);
   const hourlyToday = new Array(24).fill(0);
   const hourly2wSum = new Array(24).fill(0);
   const daysWithDataSet = new Set();
   const WEEKDAY_LABELS = ["일","월","화","수","목","금","토"];
-  const heatmapCounts = Array.from({length:7}, () => new Array(24).fill(0));
+  const heatmapSums = Array.from({length:7}, () => new Array(24).fill(0));
+  const weekdayDateCount = new Array(7).fill(0); // 요일별로 window 내 며칠이 있었는지 (평균 분모)
+  recentDates.forEach(d => { weekdayDateCount[weekdayOf(d)]++; });
   (rawLog||[]).forEach(r => {
     if (r.date === today) hourlyToday[r.hour]++;
     if (recentDatesSet.has(r.date)){
       hourly2wSum[r.hour]++;
       daysWithDataSet.add(r.date);
-      const [m,d] = r.date.split("/").map(Number);
-      const wd = new Date(DATA_YEAR, m-1, d).getDay();
-      heatmapCounts[wd][r.hour]++;
+      const wd = weekdayOf(r.date);
+      heatmapSums[wd][r.hour]++;
     }
   });
   const daysWithData = daysWithDataSet.size || 1;
   const hourly2wAvg = hourly2wSum.map(v => v/daysWithData);
   const peakHourToday = hourlyToday.indexOf(Math.max(...hourlyToday));
   const peakHour2w = hourly2wAvg.indexOf(Math.max(...hourly2wAvg));
+  const heatmapCounts = heatmapSums.map((row,wd) => row.map(v => weekdayDateCount[wd] > 0 ? Math.round((v/weekdayDateCount[wd])*10)/10 : 0));
   const heatmapMax = Math.max(1, ...heatmapCounts.flat());
   let spikeHour = -1, spikeDiff = 0;
   hourlyToday.forEach((v,h) => {
     const diff = v - hourly2wAvg[h];
     if (diff > spikeDiff){ spikeDiff = diff; spikeHour = h; }
   });
-
-  // 일별(날짜별) 시간대 히트맵 - 최근일이 맨 위로 오도록 정렬
-  const dailyLabels = [...recentDates].reverse();
-  const dailyHeatmapCounts = dailyLabels.map(() => new Array(24).fill(0));
-  const dailyDateIndex = new Map(dailyLabels.map((d,i) => [d,i]));
-  (rawLog||[]).forEach(r => {
-    const idx = dailyDateIndex.get(r.date);
-    if (idx != null) dailyHeatmapCounts[idx][r.hour]++;
-  });
-  const dailyHeatmapMax = Math.max(1, ...dailyHeatmapCounts.flat());
-
-  // 데이터 정합성 체크 (Total row vs 개별 합)
-  const gapNote = [];
-  if (totalRow){
-    const gap = (totalRow[today]||0) - inboundAgentsSumRaw;
-    if (Math.abs(gap) > 0){
-      gapNote.push(`전체 인입 합계(${fmtNum(totalRow[today])})와 개별 상담원 합(${fmtNum(inboundAgentsSumRaw)}) 사이에 ${fmtNum(Math.abs(gap))}건 차이가 있습니다. 미배정 콜 또는 추가 채널 유입 가능성이 있어 원본 시트 확인을 권장합니다.`);
-    }
-  }
 
   // 인사이트 카드 자동 생성
   const insights = [];
@@ -714,10 +702,10 @@ function render(data){
     <header>
       <div>
         <h1>CX 생산성 · CS/아웃콜 트래킹 대시보드</h1>
-        <div class="sub">CS_Tracking + Out Call_Tracking · 오더히어로 CX팀 · 기준일 ${today}</div>
+        <div class="sub">CS_Tracking + Out Call_Tracking · 오더히어로 CX팀 · 기준일 ${dateLabel(today)}</div>
       </div>
       <div class="status">
-        ${issueToday ? `<span class="badge ${isUnderstaffed?'badge-bad':'badge-good'}">${isUnderstaffed?'⚠️ ':'✅ '}${issueToday}${totalStaffToday!=null?` (${totalStaffToday}/${minStaffToday}명)`:''}</span>` : ""}
+        ${issueToday ? `<span class="badge ${isUnderstaffed?'badge-bad':'badge-good'}">${issueToday}${totalStaffToday!=null?` (${totalStaffToday}/${minStaffToday}명)`:''}</span>` : ""}
         <input type="date" id="datePicker" value="${mdToISO(today)}" min="${mdToISO(dates[0])}" max="${mdToISO(dates[dates.length-1])}" onchange="onDateChange(this.value)">
         ${selectedDateOverride ? `<button onclick="resetToLatest()">최신으로</button>` : ""}
         <span class="dot"></span>
@@ -725,8 +713,6 @@ function render(data){
         <button id="refreshBtn">지금 새로고침</button>
       </div>
     </header>
-    ${gapNote.length ? `<div class="banner">⚠️ ${gapNote.join(" ")}</div>` : ""}
-    ${dataAnomalies.length ? `<div class="banner">⚠️ 오늘(${today}) 데이터 중 ${dataAnomalies.length}개 지표가 음수로 확인되어 0으로 보정했습니다: ${dataAnomalies.join(" · ")}</div>` : ""}
 
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
@@ -736,19 +722,21 @@ function render(data){
     </div>
 
     <div class="kpis">
-      <div class="kpi"><div class="label">${today} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
+      <div class="kpi"><div class="label">${dateLabel(today)} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
         <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
-      <div class="kpi"><div class="label">통화완료율</div><div class="val">${fmtPct(completeRateToday)}</div>
+      <div class="kpi"><div class="label">CS처리율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
         <div class="delta ${delayDeltaClass}">${delayDeltaText}</div>
-        <div class="delta" style="color:${delayRateToday==null?'var(--ink-dim)':(delayOverTarget?'var(--bad)':'var(--good)')};margin-top:2px;">${delayRateToday!=null ? `완료건 대비 ${fmtPct(delayRateToday)} (목표 3% ${delayOverTarget?'초과':'이내'})` : '완료건 데이터 없음'}</div></div>
-      <div class="kpi"><div class="label">아웃콜 완료율</div><div class="val">${fmtPct(outcallToday.rate)}</div>
-        <div class="delta ${outcallDelta==null?'':(outcallDelta>=0?'up':'down')}">${outcallDelta!=null ? (outcallDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(outcallDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+        <div class="delta" style="color:${delayRateToday==null?'var(--ink-dim)':(delayOverTarget?'var(--bad)':'var(--good)')};margin-top:2px;">${delayRateToday!=null ? `완료건 대비 ${fmtPct(delayRateToday)} (목표 3%)` : '완료건 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">팀원당 평균 완료건수</div><div class="val">${avgCompletePerAgent!=null?avgCompletePerAgent.toFixed(1):'-'}</div>
+        <div class="delta">상담원 ${agents.length}명 기준</div></div>
+      <div class="kpi"><div class="label">팀원당 평균 아웃콜건수</div><div class="val">${avgOutcallPerAgent!=null?avgOutcallPerAgent.toFixed(1):'-'}</div>
+        <div class="delta">통화완료 ${fmtNum(outcallToday.completed)}건 기준</div></div>
       <div class="kpi"><div class="label">평균 담당자별 인입</div><div class="val">${avgPerAgentToday!=null?avgPerAgentToday.toFixed(1):'-'}</div>
         <div class="delta ${avgPerAgentDelta==null?'':(avgPerAgentDelta>=0?'up':'down')}">${avgPerAgentDelta!=null ? (avgPerAgentDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(avgPerAgentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">오늘 근무 인원</div><div class="val">${totalStaffToday!=null ? totalStaffToday : '-'}${minStaffToday!=null?`<span style="font-size:14px;color:var(--ink-dim);"> / 최소 ${minStaffToday}</span>`:''}</div>
-        <div class="delta ${isUnderstaffed?'down':'up'}">${issueToday || '스케줄 데이터 없음'}</div></div>
+        <div class="delta">${issueToday || '스케줄 데이터 없음'}</div></div>
     </div>
 
     <div class="grid2">
@@ -764,15 +752,15 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>요일 및 시간별 인입된 상담 수 <span class="tag">최근 ${daysWithData}일 합계 · RAW 로그 createdAt 기준</span></h2>
+        <h2>요일 및 시간별 인입된 상담 수 <span class="tag">최근 ${daysWithData}일 평균 · RAW 로그 createdAt 기준</span></h2>
         ${buildHeatmapHTML(heatmapCounts, heatmapMax, WEEKDAY_LABELS)}
       </div>
     </div>
 
     <div class="grid1">
       <div class="card">
-        <h2>일별 시간대별 인입 <span class="tag">최근 ${dailyLabels.length}일 · 최신일이 맨 위</span></h2>
-        ${buildHeatmapHTML(dailyHeatmapCounts, dailyHeatmapMax, dailyLabels, 40)}
+        <h2>시간대별 인입 <span class="tag">${dateLabel(today)}</span></h2>
+        <canvas id="chartHourlyToday"></canvas>
       </div>
     </div>
 
@@ -789,7 +777,7 @@ function render(data){
 
     <div class="grid2">
       <div class="card">
-        <h2>30분 이상 지연 <span class="tag">상담원별</span></h2>
+        <h2>30분 이상 지연 <span class="tag">상담원별 · ${dateLabel(today)}</span></h2>
         <canvas id="chartDelay"></canvas>
       </div>
       <div class="card">
@@ -801,11 +789,10 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>카테고리별 이슈 <span class="tag">TOP 티어 · ${today}</span></h2>
+        <h2>카테고리별 이슈 <span class="tag">TOP 티어 · ${dateLabel(today)}</span></h2>
         <div class="kpis" style="margin-bottom:16px;">
-          ${issueWow.slice().sort((a,b)=>b.today-a.today).map(x => {
-            return `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.today)}</div>
-              <div class="delta ${x.delta==null?'':(x.delta<=0?'up':'down')}">${x.delta!=null ? (x.delta<=0?'▼ ':'▲ ')+Math.abs(Math.round(x.delta*100))+'% (전주 동요일 대비)' : (x.wow===0?`전주 0건 → 금주 ${x.today}건`:'전주 데이터 없음')}</div></div>`;
+          ${issueTodayRanking.map(x => {
+            return `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.val)}</div></div>`;
           }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">카테고리별 이슈 데이터 없음</div>'}
         </div>
         <canvas id="chartIssueRank"></canvas>
@@ -821,17 +808,15 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>Out Call_Tracking <span class="tag">카테고리별 · ${today}</span></h2>
+        <h2>Out Call_Tracking <span class="tag">카테고리별 · ${dateLabel(today)}</span></h2>
         <div class="kpis" style="margin-bottom:16px;">
           ${(outcall.categories||[]).map(c => {
             const t = outcall.data[c]?.["Total"];
-            const inb = t?.["인입"]?.[today];
+            const completed = t?.["통화완료"]?.[today] || 0;
             const rate = t?.["통화완료_%"]?.[today];
-            const cw = categoryWow.find(x => x.category===c);
-            const d = cw?.delta;
-            return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(inb)}</div>
-              <div class="delta">완료율 ${fmtPct(rate)}</div>
-              <div class="delta ${d==null?'':(d>=0?'up':'down')}">${d!=null ? (d>=0?'▲ ':'▼ ')+Math.abs(Math.round(d*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>`;
+            const surveyed = t?.["미처리"]?.[today] || 0;
+            return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(completed)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtPct(rate)}</span></div>
+              <div class="delta">통화완료율 · ${fmtNum(surveyed)}건 서베이발송(부재)</div></div>`;
           }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">Out Call 데이터 없음</div>'}
         </div>
         <canvas id="chartOutcall"></canvas>
@@ -871,9 +856,9 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>일별 상세 (DoD) <span class="tag">${yday} → ${today} · WoW는 전주 동요일(${wowDate||'-'}) 대비</span></h2>
+        <h2>일별 상세 (DoD) <span class="tag">${dateLabel(yday)} → ${dateLabel(today)} · WoW는 전주 동요일(${wowDate?dateLabel(wowDate):'-'}) 대비</span></h2>
         <table>
-          <thead><tr><th>상담원</th><th>${yday} 인입</th><th>${today} 인입</th><th>증감(DoD)</th><th>WoW</th><th>완료율</th><th>지연</th></tr></thead>
+          <thead><tr><th>상담원</th><th>${dateLabel(yday)} 인입</th><th>${dateLabel(today)} 인입</th><th>증감(DoD)</th><th>WoW</th><th>완료율</th><th>미처리</th><th>지연</th></tr></thead>
           <tbody>
             ${agents.map(a => {
               const y = sections["상담인입"][a][yday] || 0;
@@ -882,11 +867,13 @@ function render(data){
               const w = wowDate!=null ? (sections["상담인입"][a][wowDate] || 0) : null;
               const wowPct = (w!=null && w>0) ? ((t-w)/w) : null;
               const cr = sections["상담완료율_%"]?.[a]?.[today];
+              const comp = sections["상담완료"]?.[a]?.[today] || 0;
+              const unprocessed = Math.max(0, t - comp);
               const dl = sections["30분 이상 지연"]?.[a]?.[today] || 0;
               return `<tr><td>${a}</td><td>${fmtNum(y)}</td><td>${fmtNum(t)}</td>
                 <td style="color:${diff>=0?'var(--good)':'var(--bad)'}">${diff>=0?'+':''}${diff}</td>
                 <td style="color:${wowPct==null?'var(--ink-dim)':(wowPct>=0?'var(--good)':'var(--bad)')}">${wowPct!=null ? (wowPct>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowPct*100))+'%' : (w===0?`0건→${t}건`:'-')}</td>
-                <td>${fmtPct(cr)}</td><td>${fmtNum(dl)}</td></tr>`;
+                <td>${fmtPct(cr)}</td><td>${fmtNum(unprocessed)}</td><td>${fmtNum(dl)}</td></tr>`;
             }).join("")}
           </tbody>
         </table>
@@ -895,9 +882,9 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>근무 스케줄 <span class="tag">최근 ${weekDates.length}일</span></h2>
+        <h2>근무 스케줄 <span class="tag">${dateLabel(weekDates[0])} ~ ${dateLabel(weekDates[weekDates.length-1])}</span></h2>
         <table>
-          <thead><tr><th>상담원</th>${weekDates.map(d=>`<th>${d}</th>`).join("")}</tr></thead>
+          <thead><tr><th>상담원</th>${weekDates.map(d=>`<th>${dateLabel(d, {html:true})}</th>`).join("")}</tr></thead>
           <tbody>
             ${agents.map(a => `<tr><td>${a}</td>${weekDates.map(d=>{
               const st = schedule?.schedule?.[a]?.[d];
@@ -917,10 +904,11 @@ function render(data){
 
   document.getElementById("refreshBtn").onclick = () => { refresh(true); refreshRawLog(); };
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys });
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday });
   startCountdown();
 
-  lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold };
+  const maxCompletedToday = Math.max(1, ...agents.map(a => sections["상담완료"]?.[a]?.[today] || 0));
+  lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, maxCompletedToday };
   openAgentPanel = null;
   agentDetailChart = null;
 }
@@ -930,7 +918,7 @@ function destroyCharts(){
   charts = {};
 }
 
-function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
@@ -938,15 +926,17 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
 
   const totals = dates.map(d => sum(agents.map(a => sections["상담인입"][a][d])));
   const peakIdx = totals.indexOf(Math.max(...totals));
+  const dateTickColor = (ctx) => { const d = dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
+  const dateLabels = dates.map(d => dateLabel(d));
 
   charts.inbound = new Chart(document.getElementById("chartInbound"), {
     type: "bar",
-    data: { labels: dates, datasets: [{
+    data: { labels: dateLabels, datasets: [{
       data: totals,
       backgroundColor: dates.map((_,i)=> i===peakIdx ? "#E8A33D" : "#4C6EF555"),
       borderRadius: 4
     }]},
-    options: { plugins:{legend:{display:false}}, scales:{ y:{ grid:{color:"#28324D"} }, x:{ grid:{display:false} } } }
+    options: { plugins:{legend:{display:false}}, scales:{ y:{ grid:{color:"#28324D"} }, x:{ grid:{display:false}, ticks:{color:dateTickColor} } } }
   });
 
   const shareToday = agents.map(a => sections["상담인입"][a][today] || 0);
@@ -970,34 +960,52 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
     }
   });
 
+  const hourlyCanvas = document.getElementById("chartHourlyToday");
+  if (hourlyCanvas){
+    charts.hourlyToday = new Chart(hourlyCanvas, {
+      type: "bar",
+      data: { labels: Array.from({length:24}, (_,h)=>`${h}시`), datasets: [{
+        data: hourlyToday || [],
+        backgroundColor: "#4C6EF588",
+        borderRadius: 4
+      }]},
+      options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}} } }
+    });
+  }
+
   charts.agentStack = new Chart(document.getElementById("chartAgentStack"), {
     type: "bar",
-    data: { labels: dates, datasets: agents.map(a => ({
+    data: { labels: dateLabels, datasets: agents.map(a => ({
       label: a, data: dates.map(d => sections["상담인입"][a][d] || 0),
       backgroundColor: AGENT_COLORS[a], stack: "s"
     }))},
     options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-      scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
+      scales:{ x:{stacked:true, grid:{display:false}, ticks:{color:dateTickColor}}, y:{stacked:true, grid:{color:"#28324D"}} } }
   });
 
   charts.rates = new Chart(document.getElementById("chartRates"), {
     type: "line",
-    data: { labels: dates, datasets: [
-      { label:"처리율(AVG)", data: dates.map(d=>{const v=sections["상담처리율_%"]?.["AVG"]?.[d]; return v==null?null:v*100;}), borderColor:"#4C6EF5", tension:.3, pointRadius:2, spanGaps:true },
-      { label:"완료율(Total)", data: dates.map(d=>{const v=sections["상담완료율_%"]?.["Total"]?.[d]; return v==null?null:v*100;}), borderColor:"#12B886", tension:.3, pointRadius:2, spanGaps:true }
+    data: { labels: dateLabels, datasets: [
+      { label:"처리율(AVG)", data: dates.map(d=>{const v=sections["상담처리율_%"]?.["AVG"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#4C6EF5", tension:.3, pointRadius:2, spanGaps:true },
+      { label:"완료율(Total)", data: dates.map(d=>{const v=sections["상담완료율_%"]?.["Total"]?.[d]; return v==null?null:Math.max(0,Math.min(1,v))*100;}), borderColor:"#12B886", tension:.3, pointRadius:2, spanGaps:true }
     ]},
     options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-      scales:{ y:{ ticks:{callback:v=>v+"%"}, grid:{color:"#28324D"} }, x:{grid:{display:false}} } }
+      scales:{ y:{ min:0, max:100, ticks:{callback:v=>v+"%"}, grid:{color:"#28324D"} }, x:{grid:{display:false}, ticks:{color:dateTickColor}} } }
   });
 
+  const delayAgentVals = agents.map(a => sections["30분 이상 지연"]?.[a]?.[today] || 0);
   charts.delay = new Chart(document.getElementById("chartDelay"), {
     type: "bar",
-    data: { labels: dates, datasets: agents.map(a => ({
-      label:a, data: dates.map(d=>sections["30분 이상 지연"]?.[a]?.[d] || 0),
-      backgroundColor: AGENT_COLORS[a], stack:"d"
-    }))},
-    options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-      scales:{ x:{stacked:true, grid:{display:false}}, y:{stacked:true, grid:{color:"#28324D"}} } }
+    data: { labels: agents, datasets: [{
+      data: delayAgentVals,
+      backgroundColor: agents.map(a=>AGENT_COLORS[a]),
+      borderRadius: 4
+    }]},
+    options: {
+      indexAxis: "y",
+      plugins: { legend: { display:false } },
+      scales: { x:{ grid:{color:"#28324D"} }, y:{ grid:{display:false} } }
+    }
   });
 
   const cphAvail = sections["CPH(생산성)"];
@@ -1170,18 +1178,19 @@ function toggleAgent(agent){
   header.classList.add("active");
   body.style.display = "block";
   body.innerHTML = buildAgentDetailHTML(agent);
-  drawAgentDetailChart(agent);
 }
 
 function buildAgentDetailHTML(agent){
-  const { sections, today, schedule, dates, delay30, delayHold } = lastCtx;
+  const { sections, today, schedule, dates, delay30, delayHold, maxCompletedToday } = lastCtx;
   const inb = sections["상담인입"]?.[agent]?.[today];
   const comp = sections["상담완료"]?.[agent]?.[today];
   const procRate = sections["상담처리율_%"]?.[agent]?.[today];
   const compRate = sections["상담완료율_%"]?.[agent]?.[today];
   const delay = sections["30분 이상 지연"]?.[agent]?.[today];
   const cph = sections["CPH(생산성)"]?.[agent]?.[today];
+  const cast = sections["Cast(평점)"]?.[agent]?.[today];
   const workStatus = schedule?.schedule?.[agent]?.[today];
+  const unprocessed = (inb!=null && comp!=null) ? Math.max(0, inb - comp) : null;
 
   // 근무일 기반 생산성: 최근 기간 중 근무일수 대비 평균 처리 건수
   const workDays = dates.filter(d => {
@@ -1190,6 +1199,14 @@ function buildAgentDetailHTML(agent){
   }).length;
   const totalCompleted = sum(dates.map(d => sections["상담완료"]?.[agent]?.[d] || 0));
   const productivity = workDays > 0 ? totalCompleted / workDays : null;
+
+  // CPH(생산성) 설명용 보조 점수 - 처리량(40%) + 평점(30%) + 신속성(30%)
+  const scoreVolume = (comp!=null) ? Math.min(100, (comp / maxCompletedToday) * 100) : null;
+  const scoreCast = (cast!=null) ? Math.min(100, (cast / 5.0) * 100) : null;
+  const DELAY_PENALTY = 10; // 지연 1건당 감점
+  const scoreSpeed = (delay!=null) ? Math.max(0, 100 - delay*DELAY_PENALTY) : null;
+  const scoreTotal = (scoreVolume!=null && scoreCast!=null && scoreSpeed!=null)
+    ? (scoreVolume*0.4 + scoreCast*0.3 + scoreSpeed*0.3) : null;
 
   function mdSortKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; }
   const delay30Rows = delay30.filter(r => r.agent === agent).sort((a,b) => mdSortKey(b.date) - mdSortKey(a.date));
@@ -1221,6 +1238,7 @@ function buildAgentDetailHTML(agent){
     <div class="acc-kpis">
       <div class="acc-kpi"><div class="l">상담인입</div><div class="v">${fmtNum(inb)}</div></div>
       <div class="acc-kpi"><div class="l">상담완료</div><div class="v">${fmtNum(comp)}</div></div>
+      <div class="acc-kpi"><div class="l">미처리</div><div class="v">${fmtNum(unprocessed)}</div></div>
       <div class="acc-kpi"><div class="l">처리율</div><div class="v">${fmtPct(procRate)}</div></div>
       <div class="acc-kpi"><div class="l">완료율</div><div class="v">${fmtPct(compRate)}</div></div>
       <div class="acc-kpi"><div class="l">30분 이상 지연</div><div class="v">${fmtNum(delay)}</div></div>
@@ -1228,52 +1246,23 @@ function buildAgentDetailHTML(agent){
       <div class="acc-kpi"><div class="l">CPH</div><div class="v">${cph!=null ? fmtNum(cph) : "-"}</div></div>
       <div class="acc-kpi"><div class="l">근무일 기준 생산성</div><div class="v">${productivity!=null ? productivity.toFixed(1)+'건/일' : '-'}</div></div>
     </div>
-    <canvas id="chartAgentDetail" style="max-height:220px"></canvas>
+
+    <div style="margin-top:6px;font-size:13px;font-weight:600;">CPH(생산성) 점수 구성 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· ${dateLabel(today)} 기준</span></div>
+    <div class="acc-kpis" style="margin-top:10px;">
+      <div class="acc-kpi"><div class="l">처리량 점수 (40%)</div><div class="v">${scoreVolume!=null?scoreVolume.toFixed(0):'-'}</div></div>
+      <div class="acc-kpi"><div class="l">평점 점수 (30%)</div><div class="v">${scoreCast!=null?scoreCast.toFixed(0):'-'}</div></div>
+      <div class="acc-kpi"><div class="l">신속성 점수 (30%)</div><div class="v">${scoreSpeed!=null?scoreSpeed.toFixed(0):'-'}</div></div>
+      <div class="acc-kpi" style="background:var(--panel-2);"><div class="l">종합 점수</div><div class="v" style="color:var(--accent);">${scoreTotal!=null?scoreTotal.toFixed(1):'-'}</div></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;line-height:1.6;">
+      처리량 = 완료건수 ÷ 당일 최대 완료건수(${maxCompletedToday}) × 100 · 평점 = Cast 평점 ÷ 5.0 × 100 · 신속성 = 100 − (지연 건수 × ${DELAY_PENALTY})
+    </div>
+
     <div style="margin-top:18px;font-size:13px;font-weight:600;">30분 이상 지연 상세</div>
     ${subTable(delay30Rows, "해당 상담원의 30분 이상 지연 기록이 없습니다.")}
     <div style="margin-top:18px;font-size:13px;font-weight:600;">응대지연(2시간 이상) 상세</div>
     ${subTable(delayHoldRows, "해당 상담원의 2시간 이상 응대지연 기록이 없습니다.")}
   `;
-}
-
-function drawAgentDetailChart(agent){
-  const { dates, sections } = lastCtx;
-  const canvas = document.getElementById("chartAgentDetail");
-  if (!canvas) return;
-  agentDetailChart = new Chart(canvas, {
-    data: {
-      labels: dates,
-      datasets: [
-        {
-          type: "bar",
-          label: "상담인입",
-          data: dates.map(d => sections["상담인입"]?.[agent]?.[d] ?? null),
-          backgroundColor: AGENT_COLORS[agent] + "88",
-          borderRadius: 4,
-          order: 2
-        },
-        {
-          type: "line",
-          label: "완료율(%)",
-          data: dates.map(d => { const v = sections["상담완료율_%"]?.[agent]?.[d]; return v==null? null : v*100; }),
-          borderColor: "#E8A33D",
-          yAxisID: "y1",
-          tension: .3,
-          pointRadius: 2,
-          spanGaps: true,
-          order: 1
-        }
-      ]
-    },
-    options: {
-      plugins:{ legend:{ position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}} } },
-      scales:{
-        x:{ grid:{display:false} },
-        y:{ grid:{color:"#28324D"}, title:{display:true,text:"인입 건수",font:{size:10}} },
-        y1:{ position:"right", min:0, max:100, ticks:{callback:v=>v+"%"}, grid:{display:false} }
-      }
-    }
-  });
 }
 
 /* ===================== 갱신 로직 ===================== */
