@@ -462,6 +462,8 @@ function buildHeatmapHTML(counts, max, rowLabels, labelWidth){
 
 const DATA_YEAR = 2026; // 날짜 문자열(M/D)에는 연도가 없어 대시보드가 다루는 2026년으로 고정
 const WEEKDAY_KO = ["일","월","화","수","목","금","토"];
+function dateWithDay(md){ return md ? `${md} ${WEEKDAY_KO[weekdayOf(md)]}` : "-"; }
+function dateRangeLabel(a, b){ return `${dateWithDay(a)} ~ ${dateWithDay(b)}`; }
 function weekdayOf(md){
   const [m,d] = md.split("/").map(Number);
   return new Date(DATA_YEAR, m-1, d).getDay(); // 0=일 ... 6=토
@@ -1183,7 +1185,7 @@ function renderWeekly(data){
     }
   }
 
-  const weekOptions = weeks.map(w => `<option value="${w.monday}" ${w.monday===selectedWeekMonday?'selected':''}>${w.monday} ~ ${w.saturday}</option>`).join("");
+  const weekOptions = weeks.map(w => `<option value="${w.monday}" ${w.monday===selectedWeekMonday?'selected':''}>${dateRangeLabel(w.monday, w.saturday)}</option>`).join("");
 
   app.innerHTML = `
     <header>
@@ -1259,7 +1261,7 @@ function renderWeekly(data){
         <thead><tr><th>날짜</th><th>담당자</th><th>사업장</th><th>소요시간</th><th>사유</th><th>링크</th></tr></thead>
         <tbody>
           ${delayWeek.rows.slice(0,50).map(r => `<tr>
-            <td>${r.date}</td><td style="text-align:left;">${r.agent||'-'}</td><td style="text-align:left;">${r.store||'-'}</td>
+            <td>${dateWithDay(r.date)}</td><td style="text-align:left;">${r.agent||'-'}</td><td style="text-align:left;">${r.store||'-'}</td>
             <td>${r.duration||'-'}</td><td style="text-align:left;">${r.reason||'-'}</td>
             <td>${r.url ? `<a href="${r.url}" target="_blank" style="color:var(--accent);">보기</a>` : '-'}</td>
           </tr>`).join("") || '<tr><td colspan="6" style="color:var(--ink-dim);">해당 주 30분 이상 지연 기록이 없습니다.</td></tr>'}
@@ -1363,7 +1365,7 @@ function renderMonthly(data){
   // 이번 달 내 주차별 breakdown (월별 vs 주차별 비교용)
   const weeksInMonth = buildWeekList(month.dates);
   const weekBreakdown = weeksInMonth.map(w => ({
-    label: `${w.monday}~${w.saturday}`,
+    label: dateRangeLabel(w.monday, w.saturday),
     inbound: sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))))
   }));
 
@@ -1393,7 +1395,7 @@ function renderMonthly(data){
     <header>
       <div>
         <h1>CX 생산성 · 월별 트래킹</h1>
-        <div class="sub">${month.label} (${month.dates[0]} ~ ${month.dates[month.dates.length-1]})</div>
+        <div class="sub">${month.label} (${dateRangeLabel(month.dates[0], month.dates[month.dates.length-1])})</div>
       </div>
       <div class="status">
         <select id="monthPicker" onchange="onMonthChange(this.value)" style="background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;">
@@ -1780,7 +1782,7 @@ function buildAgentDetailHTML(agent){
         <thead><tr><th>날짜</th><th>사업장</th><th>소요시간</th><th>사유</th><th>링크</th></tr></thead>
         <tbody>
           ${shown.map(r => `<tr>
-            <td>${r.date}</td><td style="text-align:left;">${r.store||'-'}</td><td>${r.duration||'-'}</td>
+            <td>${dateWithDay(r.date)}</td><td style="text-align:left;">${r.store||'-'}</td><td>${r.duration||'-'}</td>
             <td style="text-align:left;">${r.reason||'-'}</td>
             <td>${r.url ? `<a href="${r.url}" target="_blank" style="color:var(--accent);">보기</a>` : '-'}</td>
           </tr>`).join("")}
