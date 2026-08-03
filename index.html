@@ -26,6 +26,19 @@
   .badge{padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:600;}
   .badge-good{background:#123A2E;color:var(--good);}
   .badge-bad{background:#3A1A1C;color:var(--bad);}
+  .hl-good{color:var(--good);font-weight:800;}
+  .hl-bad{color:var(--bad);font-weight:800;}
+  .hl-warn{color:var(--accent);font-weight:800;}
+  .hl-num{font-weight:800;color:var(--ink);}
+  .insight-list{margin:0;padding:0;list-style:none;font-size:14px;line-height:1.5;color:var(--ink);}
+  .insight-list li{display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);}
+  .insight-list li:last-child{border-bottom:none;}
+  .insight-list .ico{flex-shrink:0;width:20px;text-align:center;font-size:15px;line-height:1.4;}
+  .insight-list b{color:var(--accent);font-weight:800;}
+  @media (max-width:640px){
+    .insight-list{font-size:15px;}
+    .kpi .val{font-size:24px;}
+  }
   .dot{width:8px;height:8px;border-radius:50%;background:var(--good);animation:pulse 2s infinite;}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   button{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;}
@@ -101,8 +114,9 @@ let agentDetailChart = null;
 let openAgentPanel = null;
 let selectedDateOverride = null; // 캘린더에서 사용자가 고른 날짜 (M/D). null이면 최신 활동일 사용
 let lastLoadedData = null; // 마지막으로 fetch한 원본 데이터 (재렌더용, refetch 없이)
-let viewMode = "daily"; // "daily" | "weekly"
+let viewMode = "daily"; // "daily" | "weekly" | "monthly"
 let selectedWeekMonday = null; // 주간 리포트에서 선택된 주의 월요일 날짜 (M/D)
+let selectedMonthKey = null; // 월간 리포트에서 선택된 월
 
 /* ===================== 파싱 ===================== */
 function parseCSV(text){
@@ -374,6 +388,18 @@ function fmtNum(v){ return v==null ? "-" : Math.round(v).toLocaleString(); }
 function sum(arr){ return arr.reduce((a,b)=>a+(b||0),0); }
 function clampPct(v){ return v==null ? null : Math.max(0, Math.min(1, v)); } // 0~100% 범위를 벗어난 이상치 값을 조용히 보정
 
+function renderInsightList(insights){
+  if (!insights.length) return '<li style="color:var(--ink-dim);">인사이트를 생성할 데이터가 부족합니다.</li>';
+  return insights.map(i => {
+    let icon = "💡";
+    if (/미달|초과|없습니다|주의|유독/.test(i)) icon = "⚠️";
+    else if (/최고|1위|가장 많|가장 높|가장 몰리는/.test(i)) icon = "🏆";
+    else if (i.includes("▲")) icon = "📈";
+    else if (i.includes("▼")) icon = "📉";
+    return `<li><span class="ico">${icon}</span><span>${i}</span></li>`;
+  }).join("");
+}
+
 // 특정 날짜의 상담원별 생산성 점수(목표 기반) 계산 - 휴무자는 null
 function dailyProductivityScores(sections, schedule, agents, d){
   const workingAgents = agents.filter(a => { const st = schedule?.schedule?.[a]?.[d]; return !(st && OFF_STATUSES.includes(st)); });
@@ -479,6 +505,10 @@ function switchToWeekly(){
   viewMode = "weekly";
   if (lastLoadedData) render(lastLoadedData);
 }
+function switchToMonthly(){
+  viewMode = "monthly";
+  if (lastLoadedData) render(lastLoadedData);
+}
 function switchToDaily(){
   viewMode = "daily";
   if (lastLoadedData) render(lastLoadedData);
@@ -486,6 +516,29 @@ function switchToDaily(){
 function onWeekChange(monday){
   selectedWeekMonday = monday;
   if (lastLoadedData) render(lastLoadedData);
+}
+function onMonthChange(key){
+  selectedMonthKey = key;
+  if (lastLoadedData) render(lastLoadedData);
+}
+
+function buildMonthList(dates){
+  const map = new Map();
+  dates.forEach(d => {
+    const [m] = d.split("/").map(Number);
+    const key = `${DATA_YEAR}-${m}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(d);
+  });
+  const list = [...map.entries()].map(([key, ds]) => {
+    const m = parseInt(key.split("-")[1]);
+    return {
+      key, month: m, label: `${m}월`,
+      dates: ds.sort((a,b) => { const [am,ad]=a.split("/").map(Number),[bm,bd]=b.split("/").map(Number); return (am*100+ad)-(bm*100+bd); })
+    };
+  });
+  list.sort((a,b) => a.month - b.month);
+  return list;
 }
 
 // 일요일을 제외한 월~토 단위로 주를 묶는다
@@ -510,6 +563,7 @@ function buildWeekList(dates){
 /* ===================== 렌더 ===================== */
 function render(data){
   if (viewMode === "weekly"){ renderWeekly(data); return; }
+  if (viewMode === "monthly"){ renderMonthly(data); return; }
   const { dates, sections, totalRow, schedule, outcall, delay30, delayHold, rawLog } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
 
@@ -663,13 +717,17 @@ function render(data){
   const daysWithDataSet = new Set();
   const WEEKDAY_LABELS = ["일","월","화","수","목","금","토"];
   const heatmapSums = Array.from({length:7}, () => new Array(24).fill(0));
-  const weekdayDateCount = new Array(7).fill(0); // 요일별로 window 내 며칠이 있었는지 (평균 분모)
-  recentDates.forEach(d => { weekdayDateCount[weekdayOf(d)]++; });
+  const weekdayDateCount = new Array(7).fill(0); // 요일별로 전체 기간 내 며칠이 있었는지 (평균 분모 - 표본 안정성을 위해 전체 기간 사용)
+  dates.forEach(d => { weekdayDateCount[weekdayOf(d)]++; });
+  const heatmapWindowSet = new Set(dates);
   (rawLog||[]).forEach(r => {
+    if (r.direction !== "INBOUND" || !agents.includes(r.agent)) return; // CS_Tracking 상담인입 범위(담당자 5명·인바운드)와 동일하게 맞춤
     if (r.date === today) hourlyToday[r.hour]++;
     if (recentDatesSet.has(r.date)){
       hourly2wSum[r.hour]++;
       daysWithDataSet.add(r.date);
+    }
+    if (heatmapWindowSet.has(r.date)){
       const wd = weekdayOf(r.date);
       heatmapSums[wd][r.hour]++;
     }
@@ -678,7 +736,7 @@ function render(data){
   const hourly2wAvg = hourly2wSum.map(v => v/daysWithData);
   const peakHourToday = hourlyToday.indexOf(Math.max(...hourlyToday));
   const peakHour2w = hourly2wAvg.indexOf(Math.max(...hourly2wAvg));
-  const heatmapCounts = heatmapSums.map((row,wd) => row.map(v => weekdayDateCount[wd] > 0 ? Math.round((v/weekdayDateCount[wd])*10)/10 : 0));
+  const heatmapCounts = heatmapSums.map((row,wd) => row.map(v => weekdayDateCount[wd] > 0 ? Math.round(v/weekdayDateCount[wd]) : 0));
   const heatmapMax = Math.max(1, ...heatmapCounts.flat());
   let spikeHour = -1, spikeDiff = 0;
   hourlyToday.forEach((v,h) => {
@@ -773,6 +831,7 @@ function render(data){
         <input type="date" id="datePicker" value="${mdToISO(today)}" min="${mdToISO(dates[0])}" max="${mdToISO(dates[dates.length-1])}" onchange="onDateChange(this.value)">
         ${selectedDateOverride ? `<button onclick="resetToLatest()">최신으로</button>` : ""}
         <button onclick="switchToWeekly()" style="background:var(--accent);color:#1a1206;font-weight:600;border:none;">주간 리포트 보기</button>
+        <button onclick="switchToMonthly()" style="background:#748FFC;color:#0F1420;font-weight:600;border:none;">월별 트래킹 보기</button>
         <span class="dot"></span>
         <span id="lastUpdated">마지막 갱신: 방금 전</span>
         <button id="refreshBtn">지금 새로고침</button>
@@ -781,8 +840,8 @@ function render(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
-      <ul style="margin:0;padding-left:18px;font-size:13px;line-height:2;color:var(--ink);">
-        ${insights.map(i => `<li>${i}</li>`).join("")}
+      <ul class="insight-list">
+        ${renderInsightList(insights)}
       </ul>
     </div>
 
@@ -817,7 +876,7 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>요일 및 시간별 인입된 상담 수 <span class="tag">최근 ${daysWithData}일 평균 · RAW 로그 createdAt 기준</span></h2>
+        <h2>요일 및 시간별 인입된 상담 수 <span class="tag">전체 기간 요일별 평균(반올림) · 인바운드·담당자 5명 기준</span></h2>
         ${buildHeatmapHTML(heatmapCounts, heatmapMax, WEEKDAY_LABELS)}
       </div>
     </div>
@@ -1136,14 +1195,15 @@ function renderWeekly(data){
         <select id="weekPicker" onchange="onWeekChange(this.value)" style="background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;">
           ${weekOptions}
         </select>
+        <button onclick="switchToMonthly()" style="background:#748FFC;color:#0F1420;font-weight:600;border:none;">월별 보기</button>
         <button onclick="switchToDaily()">일간 보기로 돌아가기</button>
       </div>
     </header>
 
     <div class="card" style="margin-bottom:16px;">
       <h2>주간 인사이트</h2>
-      <ul style="margin:0;padding-left:18px;font-size:13px;line-height:2;color:var(--ink);">
-        ${weeklyInsights.map(i=>`<li>${i}</li>`).join("") || '<li style="color:var(--ink-dim);">인사이트를 생성할 데이터가 부족합니다.</li>'}
+      <ul class="insight-list">
+        ${renderInsightList(weeklyInsights)}
       </ul>
     </div>
 
@@ -1228,6 +1288,191 @@ function renderWeekly(data){
 
     <div class="footer-note">
       월~토 기준 주간 리포트 (일요일 휴무 제외) · CS_Tracking · Out Call_Tracking · 30분 지연 체크 데이터 기준
+    </div>
+  `;
+}
+
+/* ===================== 월별 리포트 ===================== */
+function renderMonthly(data){
+  const { dates, sections, outcall, delay30 } = data;
+  const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
+  const months = buildMonthList(dates);
+  const app = document.getElementById("app");
+  if (!months.length){ app.innerHTML = '<div class="loading">월간 데이터가 없습니다.</div>'; return; }
+
+  if (!selectedMonthKey || !months.find(m => m.key === selectedMonthKey)){
+    selectedMonthKey = months[months.length-1].key;
+  }
+  const mIdx = months.findIndex(m => m.key === selectedMonthKey);
+  const month = months[mIdx];
+  const prevMonth = mIdx > 0 ? months[mIdx-1] : null;
+
+  function wowText(cur, prev, unit, pctPoint){
+    if (cur==null || prev==null) return '<span style="color:var(--ink-dim);">전월 데이터 없음</span>';
+    const diff = cur - prev;
+    const arrow = diff>=0 ? '▲' : '▼';
+    const color = diff>=0 ? 'var(--good)' : 'var(--bad)';
+    const diffTxt = pctPoint ? `${Math.abs(Math.round(diff*100))}%p` : `${fmtNum(Math.abs(diff))}${unit||'건'}`;
+    const curTxt = pctPoint ? fmtPct(cur) : fmtNum(cur);
+    const prevTxt = pctPoint ? fmtPct(prev) : fmtNum(prev);
+    return `전월 대비: ${prevTxt} → ${curTxt} (<span style="color:${color};">${arrow} ${diffTxt}</span>)`;
+  }
+
+  function cxStats(dSet){
+    if (!dSet || !dSet.length) return null;
+    const inbound = sum(dSet.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))));
+    const completed = sum(dSet.map(d => sum(agents.map(a => sections["상담완료"]?.[a]?.[d] || 0))));
+    return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
+  }
+  const cx = cxStats(month.dates);
+  const cxPrev = cxStats(prevMonth?.dates);
+
+  function outcallStats(dSet){
+    if (!dSet || !outcall?.categories?.length) return [];
+    return outcall.categories.map(c => {
+      const t = outcall.data[c]?.["Total"];
+      const inbound = sum(dSet.map(d => t?.["인입"]?.[d] || 0));
+      const completed = sum(dSet.map(d => t?.["통화완료"]?.[d] || 0));
+      const absent = sum(dSet.map(d => t?.["미처리"]?.[d] || 0));
+      return { category:c, inbound, completed, completedRate: inbound>0?completed/inbound:null, absent, absentRate: inbound>0?absent/inbound:null };
+    });
+  }
+  const outcallMonth = outcallStats(month.dates);
+  const outcallMonthPrev = outcallStats(prevMonth?.dates);
+
+  function delayStats(dSet){
+    if (!dSet) return { total:0, byReason:[] };
+    const set = new Set(dSet);
+    const rows = (delay30||[]).filter(r => set.has(r.date));
+    const reasonCount = {};
+    rows.forEach(r => { const key = r.reason || "미분류"; reasonCount[key] = (reasonCount[key]||0)+1; });
+    return { total: rows.length, byReason: Object.entries(reasonCount).map(([reason,count])=>({reason,count})).sort((a,b)=>b.count-a.count) };
+  }
+  const delayMonth = delayStats(month.dates);
+  const delayMonthPrev = delayStats(prevMonth?.dates);
+
+  const issueSection = sections["카테고리별 이슈"] || {};
+  const issueCategories = Object.keys(issueSection);
+  function issueStats(dSet){
+    if (!dSet) return [];
+    return issueCategories.map(c => ({ category:c, total: sum(dSet.map(d => issueSection[c][d] || 0)) }));
+  }
+  const issueMonth = issueStats(month.dates).sort((a,b)=>b.total-a.total);
+  const issueMonthPrevMap = Object.fromEntries(issueStats(prevMonth?.dates).map(x=>[x.category,x.total]));
+
+  // 이번 달 내 주차별 breakdown (월별 vs 주차별 비교용)
+  const weeksInMonth = buildWeekList(month.dates);
+  const weekBreakdown = weeksInMonth.map(w => ({
+    label: `${w.monday}~${w.saturday}`,
+    inbound: sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))))
+  }));
+
+  const monthlyInsights = [];
+  if (cx && cxPrev){
+    const diff = cx.inbound - cxPrev.inbound;
+    monthlyInsights.push(`전월(${prevMonth.label}) 인입 ${fmtNum(cxPrev.inbound)}건 → 이번 달(${month.label}) ${fmtNum(cx.inbound)}건 (${diff>=0?'▲':'▼'} ${fmtNum(Math.abs(diff))}건)`);
+  }
+  if (cx && cx.rate!=null) monthlyInsights.push(`${month.label} 응대율은 ${fmtPct(cx.rate)}입니다.`);
+  if (weekBreakdown.length){
+    const peak = weekBreakdown.reduce((a,b)=>b.inbound>a.inbound?b:a);
+    monthlyInsights.push(`${month.label} 중 인입이 가장 많았던 주는 <b>${peak.label}</b> (${fmtNum(peak.inbound)}건)입니다.`);
+  }
+  if (delayMonth.byReason.length){
+    const top = delayMonth.byReason[0];
+    const pct = delayMonth.total>0 ? Math.round((top.count/delayMonth.total)*100) : 0;
+    monthlyInsights.push(`${month.label} 30분 응대지연 총 ${delayMonth.total}건 중 "${top.reason}"가 ${top.count}건(${pct}%)으로 가장 많습니다.`);
+  }
+  if (issueMonth.length && issueMonth[0].total>0){
+    monthlyInsights.push(`${month.label} 가장 많이 발생한 이슈 카테고리는 <b>${issueMonth[0].category}</b> (${fmtNum(issueMonth[0].total)}건)입니다.`);
+  }
+
+  const monthOptions = months.map(m => `<option value="${m.key}" ${m.key===selectedMonthKey?'selected':''}>${m.label}</option>`).join("");
+  const weekBarMax = Math.max(1, ...weekBreakdown.map(w=>w.inbound));
+
+  app.innerHTML = `
+    <header>
+      <div>
+        <h1>CX 생산성 · 월별 트래킹</h1>
+        <div class="sub">${month.label} (${month.dates[0]} ~ ${month.dates[month.dates.length-1]})</div>
+      </div>
+      <div class="status">
+        <select id="monthPicker" onchange="onMonthChange(this.value)" style="background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;">
+          ${monthOptions}
+        </select>
+        <button onclick="switchToWeekly()" style="background:var(--accent);color:#1a1206;font-weight:600;border:none;">주간 보기</button>
+        <button onclick="switchToDaily()">일간 보기로 돌아가기</button>
+      </div>
+    </header>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>월간 인사이트</h2>
+      <ul class="insight-list">
+        ${renderInsightList(monthlyInsights)}
+      </ul>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>채널톡 인입 및 응대현황 (월간)</h2>
+      <div class="kpis">
+        <div class="kpi"><div class="label">상담인입 (채널톡/Call)</div><div class="val">${fmtNum(cx?.inbound)}</div></div>
+        <div class="kpi"><div class="label">응대현황 (상담완료)</div><div class="val">${fmtNum(cx?.completed)}</div></div>
+        <div class="kpi"><div class="label">응대율</div><div class="val">${fmtPct(cx?.rate)}</div></div>
+      </div>
+      <div style="margin-top:14px;font-size:13px;color:var(--ink-dim);line-height:1.9;">
+        인입 ${wowText(cx?.inbound, cxPrev?.inbound)}<br>
+        완료 ${wowText(cx?.completed, cxPrev?.completed)}<br>
+        응대율 ${wowText(cx?.rate, cxPrev?.rate, null, true)}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>주차별 인입 비교 <span class="tag">${month.label} 내 주차별</span></h2>
+      <table>
+        <thead><tr><th>주차</th><th>상담인입</th><th></th></tr></thead>
+        <tbody>
+          ${weekBreakdown.map(w => `<tr><td style="text-align:left;">${w.label}</td><td>${fmtNum(w.inbound)}</td>
+            <td style="width:50%;"><div style="background:#4C6EF5;height:14px;border-radius:4px;width:${weekBarMax>0?Math.round((w.inbound/weekBarMax)*100):0}%;"></div></td></tr>`).join("") || '<tr><td colspan="3" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>CX 아웃콜 운영현황 (월간)</h2>
+      <div class="kpis">
+        ${outcallMonth.map((o,i) => {
+          const p = outcallMonthPrev[i];
+          return `<div class="kpi"><div class="label">${o.category} 아웃 Call 응대현황</div><div class="val">${fmtNum(o.inbound)}건</div>
+          <div class="delta">완료율 · ${fmtNum(o.completed)}건 ${fmtPct(o.completedRate)}</div>
+          <div class="delta">부재율(서베이발송) · ${fmtNum(o.absent)}건 ${fmtPct(o.absentRate)}</div>
+          <div class="delta" style="margin-top:4px;font-size:11px;">${wowText(o.inbound, p?.inbound)}</div></div>`;
+        }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>카테고리별 이슈 (월간)</h2>
+      <div class="kpis">
+        ${issueMonth.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
+          <div class="delta" style="font-size:11px;">${wowText(x.total, issueMonthPrevMap[x.category])}</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>30분 응대지연 현황 (월간)</h2>
+      <div class="kpis" style="margin-bottom:16px;">
+        <div class="kpi"><div class="label">총 지연 건수</div><div class="val">${fmtNum(delayMonth.total)}</div>
+          <div class="delta" style="font-size:11px;">${wowText(delayMonth.total, delayMonthPrev.total)}</div></div>
+      </div>
+      <table>
+        <thead><tr><th>사유</th><th>건수</th><th>비중</th></tr></thead>
+        <tbody>
+          ${delayMonth.byReason.map(r => `<tr><td style="text-align:left;">${r.reason}</td><td>${fmtNum(r.count)}</td><td>${delayMonth.total>0?Math.round((r.count/delayMonth.total)*100):0}%</td></tr>`).join("") || '<tr><td colspan="3" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="footer-note">
+      월별 트래킹 · CS_Tracking · Out Call_Tracking · 30분 지연 체크 데이터 기준
     </div>
   `;
 }
