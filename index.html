@@ -99,13 +99,84 @@ const SCHEDULE_NAME_MAP = { Sense: "Zenze", Maru: "maru" }; // 스케줄 시트 
 const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무"]; // 근무 아닌 상태로 취급
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
 const UNPROCESSED_STATES = ["missed","opened","snoozed"]; // 미처리로 집계할 상태값 (closed=종료, initial=미배정 대기는 제외)
+
+// MBO 업적평가표 '공통 MBO' 가중치 (담당자별 상이) - 20260803 역량평가표 CX팀 수정안 V2 기준
+const MBO_WEIGHTS = {
+  Punisher: { claim:10, delay:15, outcall:15 },
+  maru:     { claim:20, delay:10, outcall:25 },
+  Tsuna:    { claim:20, delay:10, outcall:25 },
+  Hugo:     { claim:20, delay:10, outcall:25 },
+};
+function durationToMinutes(hhmmss){
+  if (!hhmmss) return null;
+  const p = hhmmss.split(":").map(Number);
+  if (p.length !== 3 || p.some(isNaN)) return null;
+  return p[0]*60 + p[1] + p[2]/60;
+}
+// 데일리 클레임율(당일 처리 완료율) 달성률 - 평가척도: 97%↑ 만점 / 95~96.9% 90% / 90~94.9% 70% / 85~89.9% 50% / 85%미만 30%
+function achieveClaimRate(rate){
+  if (rate == null) return null;
+  if (rate >= 0.97) return 1.00;
+  if (rate >= 0.95) return 0.90;
+  if (rate >= 0.90) return 0.70;
+  if (rate >= 0.85) return 0.50;
+  return 0.30;
+}
+// 30분 응대지연 달성률 - 지연율 3%이하 & 리드타임 20분이하 모두 달성 만점 / 1개만 75% / 지연율5%초과·리드타임25분초과 50% / 지연율8%초과 30%
+function achieveDelay(rate, leadMin){
+  if (rate == null) return null;
+  const rateOk = rate <= 0.03;
+  const leadOk = leadMin != null ? leadMin <= 20 : null;
+  if (rateOk && leadOk) return 1.00;
+  if (rate > 0.08) return 0.30;
+  if (rate > 0.05 || leadOk === false) return 0.50;
+  if (rateOk || leadOk) return 0.75;
+  return 0.50;
+}
+// 온보딩 아웃콜 완료(통화완료+서베이발송 포함 처리율) 달성률 - 100% 만점 / 90~99% 80% / 80~89% 60% / 80%미만 40%
+function achieveOutcall(rate){
+  if (rate == null) return null;
+  if (rate >= 1.00) return 1.00;
+  if (rate >= 0.90) return 0.80;
+  if (rate >= 0.80) return 0.60;
+  return 0.40;
+}
+// 특정 담당자·날짜의 MBO 공통 목표 3종 실적/달성률 계산
+function mboScoresForAgent(sections, delay30, outcall, agent, date){
+  const claimRate = clampPct(sections["상담완료율_%"]?.[agent]?.[date]);
+  const comp = sections["상담완료"]?.[agent]?.[date] || 0;
+  const delayCnt = sections["30분 이상 지연"]?.[agent]?.[date] || 0;
+  const delayRate = comp>0 ? delayCnt/comp : (delayCnt>0 ? 1 : 0);
+  const agentDelayRows = (delay30||[]).filter(r => r.agent===agent && r.date===date);
+  const leadMins = agentDelayRows.map(r => durationToMinutes(r.duration)).filter(v=>v!=null);
+  const leadMin = leadMins.length ? sum(leadMins)/leadMins.length : null;
+
+  let outInbound=0, outCompleted=0, outSurveyed=0;
+  (outcall?.categories||[]).forEach(c => {
+    outInbound += outcall.data[c]?.[agent]?.["인입"]?.[date] || 0;
+    outCompleted += outcall.data[c]?.[agent]?.["통화완료"]?.[date] || 0;
+    outSurveyed += outcall.data[c]?.[agent]?.["미처리"]?.[date] || 0;
+  });
+  const outcallRate = outInbound>0 ? (outCompleted+outSurveyed)/outInbound : null;
+
+  const w = MBO_WEIGHTS[agent];
+  const aClaim = achieveClaimRate(claimRate);
+  const aDelay = achieveDelay(delayRate, leadMin);
+  const aOutcall = achieveOutcall(outcallRate);
+  let weighted = null;
+  if (w && aClaim!=null && aDelay!=null && aOutcall!=null){
+    const totalW = w.claim + w.delay + w.outcall;
+    weighted = (aClaim*w.claim + aDelay*w.delay + aOutcall*w.outcall) / totalW;
+  }
+  return { claimRate, delayRate, leadMin, outcallRate, aClaim, aDelay, aOutcall, weighted, weights:w };
+}
 const STATE_LABELS = { closed:"종료", missed:"미처리 상담", initial:"인입 대기", opened:"처리중", snoozed:"보류" };
 const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아웃콜/지연 시트)
 const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC" };
-const AGENT_ORDER = ["Punisher","maru","Zenze","Tsuna","Hugo","Carol"];
+const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol"]; // Zenze 8/1 퇴사로 제외
 
 let charts = {}; // keep instances to destroy on refresh
 let countdownTimer = null;
@@ -821,6 +892,14 @@ function render(data){
   if (agentDetailChart){ agentDetailChart.destroy(); agentDetailChart = null; }
   openAgentPanel = null;
 
+  // MBO 공통 목표 달성 현황 (오늘 + 최근 기간 흐름)
+  const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
+  const mboToday = Object.fromEntries(mboAgents.map(a => [a, mboScoresForAgent(sections, delay30, outcall, a, today)]));
+  const mboTrend = recentDates.map(d => {
+    const dayScores = mboAgents.map(a => mboScoresForAgent(sections, delay30, outcall, a, d).weighted).filter(v=>v!=null);
+    return dayScores.length ? sum(dayScores)/dayScores.length : null;
+  });
+
   const app = document.getElementById("app");
   app.innerHTML = `
     <header>
@@ -962,6 +1041,32 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
+        <h2>MBO 공통 목표 달성 현황 <span class="tag">${dateLabel(today)} · 클레임율 97%↑ · 지연율 3%↓ · 아웃콜 100%</span></h2>
+        <table>
+          <thead><tr><th>상담원</th><th>데일리 클레임율</th><th>달성률</th><th>30분 지연율</th><th>달성률</th><th>온보딩 아웃콜</th><th>달성률</th><th>종합 가중점수</th></tr></thead>
+          <tbody>
+            ${mboAgents.map(a => {
+              const s = mboToday[a];
+              return `<tr><td style="text-align:left;">${a}</td>
+                <td>${fmtPct(s.claimRate)}</td><td style="color:${s.aClaim==null?'inherit':(s.aClaim>=1?'var(--good)':s.aClaim>=0.7?'var(--accent)':'var(--bad)')}">${s.aClaim!=null?Math.round(s.aClaim*100)+'%':'-'}</td>
+                <td>${fmtPct(s.delayRate)}</td><td style="color:${s.aDelay==null?'inherit':(s.aDelay>=1?'var(--good)':s.aDelay>=0.7?'var(--accent)':'var(--bad)')}">${s.aDelay!=null?Math.round(s.aDelay*100)+'%':'-'}</td>
+                <td>${fmtPct(s.outcallRate)}</td><td style="color:${s.aOutcall==null?'inherit':(s.aOutcall>=1?'var(--good)':s.aOutcall>=0.7?'var(--accent)':'var(--bad)')}">${s.aOutcall!=null?Math.round(s.aOutcall*100)+'%':'-'}</td>
+                <td style="font-weight:700;color:var(--accent);">${s.weighted!=null?Math.round(s.weighted*100)+'%':'-'}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="margin-top:16px;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:10px;">목표 달성률 흐름 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 최근 ${recentDates.length}일 · 상담원 평균 종합 가중점수</span></div>
+          <canvas id="chartMboTrend"></canvas>
+        </div>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo(20/10/25) 기준 · 30분 지연 리드타임은 지연콜 평균 소요시간으로 근사 계산
+        </div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
         <h2>상담원별 상세 <span class="tag">이름을 클릭하면 펼쳐집니다</span></h2>
         ${agents.map(a => {
           const inb = sections["상담인입"][a][today] || 0;
@@ -1045,7 +1150,7 @@ function render(data){
   }
   const productivityScores = agents.map(productivityScoreOf);
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores });
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend });
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, targetCompletedToday, DELAY_PENALTY, rawLog };
@@ -1153,6 +1258,20 @@ function renderWeekly(data){
   const agentWeek = agentWeekProductivity(week);
   const agentWeekPrev = agentWeekProductivity(prevWeek);
 
+  // MBO 공통 목표 주간 달성 현황 (일별 달성률의 주간 평균)
+  const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
+  function mboWeekStats(w){
+    if (!w) return {};
+    const out = {};
+    mboAgents.forEach(a => {
+      const daily = w.dates.map(d => mboScoresForAgent(sections, delay30, outcall, a, d)).filter(s => s.weighted!=null);
+      out[a] = daily.length ? sum(daily.map(s=>s.weighted))/daily.length : null;
+    });
+    return out;
+  }
+  const mboWeek = mboWeekStats(week);
+  const mboWeekPrev = mboWeekStats(prevWeek);
+
   const weeklyInsights = [];
   if (cx && cxPrev){
     const diff = cx.inbound - cxPrev.inbound;
@@ -1221,6 +1340,9 @@ function renderWeekly(data){
         완료 ${wowText(cx?.completed, cxPrev?.completed)}<br>
         응대율 ${wowText(cx?.rate, cxPrev?.rate, null, true)}
       </div>
+      <div style="margin-top:16px;">
+        <canvas id="chartWeekDaily"></canvas>
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -1288,10 +1410,42 @@ function renderWeekly(data){
       </table>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <h2>MBO 공통 목표 달성 현황 (주간)</h2>
+      <table>
+        <thead><tr><th>상담원</th><th>주간 종합 가중점수</th><th>전주 대비</th></tr></thead>
+        <tbody>
+          ${mboAgents.map(a => {
+            const cur = mboWeek[a];
+            const prev = mboWeekPrev[a];
+            const diff = (cur!=null && prev!=null) ? cur-prev : null;
+            return `<tr><td style="text-align:left;">${a}</td>
+              <td style="font-weight:700;color:var(--accent);">${cur!=null ? Math.round(cur*100)+'%' : '-'}</td>
+              <td style="color:${diff==null?'var(--ink-dim)':(diff>=0?'var(--good)':'var(--bad)')}">${diff!=null ? (diff>=0?'▲ ':'▼ ')+Math.abs(Math.round(diff*100))+'%p' : '전주 데이터 없음'}</td></tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표의 일별 달성률을 주간 평균한 값입니다.</div>
+    </div>
+
     <div class="footer-note">
       월~토 기준 주간 리포트 (일요일 휴무 제외) · CS_Tracking · Out Call_Tracking · 30분 지연 체크 데이터 기준
     </div>
   `;
+
+  destroyCharts();
+  const weekDailyCanvas = document.getElementById("chartWeekDaily");
+  if (weekDailyCanvas){
+    const perDay = week.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)));
+    charts.weekDaily = new Chart(weekDailyCanvas, {
+      type: "bar",
+      data: {
+        labels: week.dates.map(d => dateWithDay(d)),
+        datasets: [{ data: perDay, backgroundColor: "#4C6EF588", borderRadius: 4 }]
+      },
+      options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}} } }
+    });
+  }
 }
 
 /* ===================== 월별 리포트 ===================== */
@@ -1341,6 +1495,29 @@ function renderMonthly(data){
   }
   const outcallMonth = outcallStats(month.dates);
   const outcallMonthPrev = outcallStats(prevMonth?.dates);
+
+  const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
+  function mboMonthStats(dSet){
+    if (!dSet) return {};
+    const out = {};
+    mboAgents.forEach(a => {
+      const daily = dSet.map(d => mboScoresForAgent(sections, delay30, outcall, a, d)).filter(s => s.weighted!=null);
+      out[a] = daily.length ? sum(daily.map(s=>s.weighted))/daily.length : null;
+    });
+    return out;
+  }
+  const mboMonth = mboMonthStats(month.dates);
+  const mboMonthPrev = mboMonthStats(prevMonth?.dates);
+
+  // 온보딩→2·5발주 전환 추이 (전체 기간, 주별 통화완료 건수)
+  const funnelWeeks = buildWeekList(dates);
+  const funnelData = funnelWeeks.map(w => {
+    const row = { label: dateRangeLabel(w.monday, w.saturday) };
+    (outcall?.categories||[]).forEach(c => {
+      row[c] = sum(w.dates.map(d => outcall.data[c]?.["Total"]?.["통화완료"]?.[d] || 0));
+    });
+    return row;
+  });
 
   function delayStats(dSet){
     if (!dSet) return { total:0, byReason:[] };
@@ -1425,6 +1602,9 @@ function renderMonthly(data){
         완료 ${wowText(cx?.completed, cxPrev?.completed)}<br>
         응대율 ${wowText(cx?.rate, cxPrev?.rate, null, true)}
       </div>
+      <div style="margin-top:16px;">
+        <canvas id="chartMonthDaily"></canvas>
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -1452,6 +1632,15 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+      <h2>온보딩 → 2·5발주 전환 추이 <span class="tag">주별 통화완료 건수 비교</span></h2>
+      <canvas id="chartOnboardFunnel"></canvas>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+        Out Call_Tracking은 카테고리(신규온보딩/2발주/5발주)별 집계만 제공되어, 이 차트는 <b>업장 단위 추적이 아닌 주별 볼륨 추이로 전환 흐름을 가늠하는 참고 지표</b>입니다.
+        온보딩콜을 받은 "그 업장"이 실제로 2·5발주를 했는지 업장 단위로 정확히 보시려면, 업장 식별자가 포함된 원본 데이터 연동이 필요합니다 — 필요하시면 알려주세요.
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>카테고리별 이슈 (월간)</h2>
       <div class="kpis">
         ${issueMonth.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
@@ -1473,13 +1662,68 @@ function renderMonthly(data){
       </table>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <h2>MBO 공통 목표 달성 현황 (월간)</h2>
+      <table>
+        <thead><tr><th>상담원</th><th>월간 종합 가중점수</th><th>전월 대비</th></tr></thead>
+        <tbody>
+          ${mboAgents.map(a => {
+            const cur = mboMonth[a];
+            const prev = mboMonthPrev[a];
+            const diff = (cur!=null && prev!=null) ? cur-prev : null;
+            return `<tr><td style="text-align:left;">${a}</td>
+              <td style="font-weight:700;color:var(--accent);">${cur!=null ? Math.round(cur*100)+'%' : '-'}</td>
+              <td style="color:${diff==null?'var(--ink-dim)':(diff>=0?'var(--good)':'var(--bad)')}">${diff!=null ? (diff>=0?'▲ ':'▼ ')+Math.abs(Math.round(diff*100))+'%p' : '전월 데이터 없음'}</td></tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표의 일별 달성률을 월간 평균한 값입니다.</div>
+    </div>
+
     <div class="footer-note">
       월별 트래킹 · CS_Tracking · Out Call_Tracking · 30분 지연 체크 데이터 기준
     </div>
   `;
+
+  destroyCharts();
+  const monthDailyCanvas = document.getElementById("chartMonthDaily");
+  if (monthDailyCanvas){
+    const perDay = month.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)));
+    const tickColor = (ctx) => { const d = month.dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
+    charts.monthDaily = new Chart(monthDailyCanvas, {
+      type: "bar",
+      data: {
+        labels: month.dates.map(d => d),
+        datasets: [{ data: perDay, backgroundColor: "#4C6EF588", borderRadius: 3 }]
+      },
+      options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}, ticks:{color:tickColor, maxRotation:90, minRotation:90}} } }
+    });
+  }
+
+  const funnelCanvas = document.getElementById("chartOnboardFunnel");
+  if (funnelCanvas && funnelData.length){
+    const cats = outcall?.categories || [];
+    const palette = { "신규온보딩":"#4C6EF5", "2발주":"#12B886", "5발주":"#F76707" };
+    charts.onboardFunnel = new Chart(funnelCanvas, {
+      type: "line",
+      data: {
+        labels: funnelData.map(f => f.label),
+        datasets: cats.map(c => ({
+          label: c,
+          data: funnelData.map(f => f[c] || 0),
+          borderColor: palette[c] || "#748FFC",
+          backgroundColor: palette[c] || "#748FFC",
+          tension: .3,
+          pointRadius: 3
+        }))
+      },
+      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
+        scales:{ x:{grid:{display:false}, ticks:{font:{size:9}}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"통화완료 건수",font:{size:10}} } } }
+    });
+  }
 }
 
-function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
@@ -1718,6 +1962,28 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
       },
       options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
         scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"이슈 건수",font:{size:10}} } } }
+    });
+  }
+
+  const mboCanvas = document.getElementById("chartMboTrend");
+  if (mboCanvas && mboTrend){
+    const dateTickColor2 = (ctx) => { const d = dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
+    charts.mboTrend = new Chart(mboCanvas, {
+      type: "line",
+      data: {
+        labels: dates.map(d => dateLabel(d)),
+        datasets: [{
+          label: "종합 가중점수(평균)",
+          data: mboTrend.map(v => v==null ? null : Math.round(v*1000)/10),
+          borderColor: "#E8A33D",
+          backgroundColor: "#E8A33D",
+          tension: .3,
+          pointRadius: 3,
+          spanGaps: true
+        }]
+      },
+      options: { plugins:{legend:{display:false}},
+        scales:{ y:{ min:0, max:100, ticks:{callback:v=>v+"%"}, grid:{color:"#28324D"} }, x:{grid:{display:false}, ticks:{color:dateTickColor2}} } }
     });
   }
 }
