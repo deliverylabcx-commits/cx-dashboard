@@ -95,9 +95,13 @@ const OUTCALL_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_al
 const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1307884512&single=true&output=csv";
 const DELAYHOLD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=634573420&single=true&output=csv";
 const RAWLOG_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=0&single=true&output=csv";
+const ONBOARD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1671449001&single=true&output=csv";
+const CALL_SUCCESS_RESULTS = ["콜완료"]; // 통화 성공으로 집계할 Call_result 값
 const SCHEDULE_NAME_MAP = { Sense: "Zenze", Maru: "maru" }; // 스케줄 시트 표기 → CS_Tracking 표기로 정규화
 const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무"]; // 근무 아닌 상태로 취급
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
+const OUTCALL_TARGET_RATE = 0.50; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
+const LETTERING_START = "8/11"; // 모바일 레터링 서비스 운영 시작일 - 전후 비교 기준
 const UNPROCESSED_STATES = ["missed","opened","snoozed"]; // 미처리로 집계할 상태값 (closed=종료, initial=미배정 대기는 제외)
 
 // MBO 업적평가표 '공통 MBO' 가중치 (담당자별 상이) - 20260803 역량평가표 CX팀 수정안 V2 기준
@@ -375,6 +379,68 @@ function parseDelayRows(text){
 }
 
 /* ===================== 원본 이벤트 로그 파싱 (시간대별 인입 분석용) ===================== */
+/* ===================== 신규 온보딩 Out Call 파싱 (타임스탬프 중복 보정 포함) ===================== */
+function parseOnboardCalls(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
+  const rows = parsed.data;
+  const headerIdx = rows.findIndex(r => (r||[]).some(c => (c||"").trim() === "Call_result"));
+  if (headerIdx < 0) return [];
+  const header = rows[headerIdx].map(h => (h||"").trim());
+  const idx = {
+    callDate: header.indexOf("Call_Date"),
+    code: header.indexOf("Code"),
+    store: header.indexOf("업장명"),
+    memberId: header.indexOf("회원ID"),
+    agent: header.indexOf("당당자") >= 0 ? header.indexOf("당당자") : header.indexOf("담당자"),
+    ts: header.indexOf("타임스탬프"),
+    result: header.indexOf("Call_result"),
+  };
+
+  function parseDT(v){
+    v = (v||"").trim();
+    if (!v) return null;
+    const m = v.match(/^(\d{4})[-.\/]\s*(\d{1,2})[-.\/]\s*(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (!m) return null;
+    return new Date(+m[1], +m[2]-1, +m[3], +(m[4]||0), +(m[5]||0), +(m[6]||0));
+  }
+
+  const out = [];
+  for (let r = headerIdx + 1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row) continue;
+    const callDate = parseDT(row[idx.callDate]);
+    if (!callDate) continue;
+    out.push({
+      callDate,
+      dateMD: `${callDate.getMonth()+1}/${callDate.getDate()}`,
+      code: (row[idx.code]||"").trim(),
+      store: (row[idx.store]||"").trim(),
+      memberId: (row[idx.memberId]||"").trim(),
+      agent: (row[idx.agent]||"").trim(),
+      ts: parseDT(row[idx.ts]),
+      result: (row[idx.result]||"").trim(),
+    });
+  }
+
+  // 타임스탬프 중복 보정: 같은 담당자·같은 시각에 배치 입력된 건들을 30분 구간에 균등 분산
+  const groups = new Map();
+  out.forEach((d,i) => {
+    if (!d.ts) return;
+    const key = `${d.agent}|${d.ts.getTime()}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  groups.forEach(idxs => {
+    if (idxs.length <= 1) return;
+    const base = out[idxs[0]].ts.getTime();
+    const stepMs = (30*60*1000) / idxs.length;
+    idxs.forEach((i,k) => { out[i].tsNorm = new Date(base + stepMs*k); });
+  });
+  out.forEach(d => { if (!d.tsNorm) d.tsNorm = d.ts; });
+
+  return out;
+}
+
 function parseRawLog(text){
   const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
   const rows = parsed.data;
@@ -436,7 +502,11 @@ async function loadMainData(){
   try { delayHold = parseDelayRows(await fetchCSV(DELAYHOLD_CSV_URL)); }
   catch(e){ console.warn("응대지연_보류 시트를 불러오지 못했습니다:", e.message); }
 
-  return { ...parseCSV(csText), schedule, outcall, delay30, delayHold };
+  let onboardCalls = [];
+  try { onboardCalls = parseOnboardCalls(await fetchCSV(ONBOARD_CSV_URL)); }
+  catch(e){ console.warn("신규 온보딩_Out Call 시트를 불러오지 못했습니다:", e.message); }
+
+  return { ...parseCSV(csText), schedule, outcall, delay30, delayHold, onboardCalls };
 }
 
 async function loadRawLog(){
@@ -458,6 +528,59 @@ function fmtPct(v){ return v==null ? "-" : Math.round(v*100) + "%"; }
 function fmtNum(v){ return v==null ? "-" : Math.round(v).toLocaleString(); }
 function sum(arr){ return arr.reduce((a,b)=>a+(b||0),0); }
 function clampPct(v){ return v==null ? null : Math.max(0, Math.min(1, v)); } // 0~100% 범위를 벗어난 이상치 값을 조용히 보정
+
+// 아웃콜 카테고리별 시간대 통화 결과 집계
+function outcallHourlyStats(onboardCalls, dateFilter){
+  const stats = {}; // code -> hour -> {total, success, results:{}}
+  (onboardCalls||[]).forEach(d => {
+    if (!d.tsNorm) return;
+    if (dateFilter && !dateFilter(d)) return;
+    const h = d.tsNorm.getHours();
+    stats[d.code] = stats[d.code] || {};
+    stats[d.code][h] = stats[d.code][h] || { total:0, success:0, results:{} };
+    const s = stats[d.code][h];
+    s.total++;
+    if (CALL_SUCCESS_RESULTS.includes(d.result)) s.success++;
+    s.results[d.result] = (s.results[d.result]||0) + 1;
+  });
+  return stats;
+}
+
+// 온보딩 → 2발주/5발주 전환율 및 리드타임 (회원ID 우선, 없으면 업장명으로 매칭)
+function onboardConversion(onboardCalls, dateFilter){
+  const keyOf = d => (d.memberId && d.memberId !== "" ) ? `id:${d.memberId}` : `nm:${(d.store||"").replace(/\s/g,"").toLowerCase()}`;
+  const onboard = new Map();
+  (onboardCalls||[]).forEach(d => {
+    if (d.code !== "신규온보딩") return;
+    if (dateFilter && !dateFilter(d)) return;
+    const k = keyOf(d);
+    const prev = onboard.get(k);
+    if (!prev || d.callDate < prev.callDate) onboard.set(k, d);
+  });
+  const result = { base: onboard.size, targets: {} };
+  ["2발주","5발주"].forEach(target => {
+    const seen = new Set();
+    const leads = [];
+    let hits = 0;
+    (onboardCalls||[]).forEach(d => {
+      if (d.code !== target) return;
+      const k = keyOf(d);
+      if (!onboard.has(k) || seen.has(k)) return;
+      seen.add(k);
+      hits++;
+      const days = Math.round((d.callDate - onboard.get(k).callDate) / 86400000);
+      if (days >= 0) leads.push(days);
+    });
+    leads.sort((a,b)=>a-b);
+    result.targets[target] = {
+      hits,
+      rate: onboard.size>0 ? hits/onboard.size : null,
+      avgLead: leads.length ? leads.reduce((a,b)=>a+b,0)/leads.length : null,
+      medLead: leads.length ? leads[Math.floor(leads.length/2)] : null,
+    };
+  });
+  return result;
+}
 
 function renderInsightList(insights){
   if (!insights.length) return '<li style="color:var(--ink-dim);">인사이트를 생성할 데이터가 부족합니다.</li>';
@@ -865,6 +988,18 @@ function render(data){
         const worstUnprocessed = unprocessed.reduce((a,b) => b[1]>a[1] ? b : a);
         insights.push(`아웃콜 부재(서베이발송)가 가장 많은 카테고리는 <b>${worstUnprocessed[0]}</b> (${worstUnprocessed[1]}건)입니다.`);
       }
+      const targetMet = catRates.filter(([,r]) => r >= OUTCALL_TARGET_RATE).map(([c])=>c);
+      const targetMiss = catRates.filter(([,r]) => r < OUTCALL_TARGET_RATE);
+      if (targetMet.length) insights.push(`아웃콜 성공률 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%)을 달성한 카테고리는 <b>${targetMet.join(", ")}</b>입니다.`);
+      if (targetMiss.length){
+        const worst = targetMiss.reduce((a,b)=>b[1]<a[1]?b:a);
+        insights.push(`아웃콜 성공률이 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%)에 가장 못 미치는 카테고리는 <b>${worst[0]}</b> (${fmtPct(worst[1])})입니다.`);
+      }
+      const outcallByAgent = agents.map(a => {
+        const completed = sum((outcall.categories||[]).map(c => outcall.data[c]?.[a]?.["통화완료"]?.[today] || 0));
+        return [a, completed];
+      }).filter(([,v]) => v>0).sort((x,y)=>y[1]-x[1]);
+      if (outcallByAgent.length) insights.push(`오늘 아웃콜을 가장 많이 성공시킨 상담원은 <b>${outcallByAgent[0][0]}</b> (통화완료 ${fmtNum(outcallByAgent[0][1])}건)입니다.`);
     }
     const inboundRanking = agents.map(a => [a, sections["상담인입"][a][today] || 0]).sort((x,y) => y[1]-x[1]);
     if (inboundRanking.length && inboundRanking[0][1] > 0){
@@ -1013,15 +1148,26 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>Out Call_Tracking <span class="tag">카테고리별 · ${dateLabel(today)}</span></h2>
+        <h2>Out Call_Tracking <span class="tag">카테고리별 · ${dateLabel(today)} · 성공률 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
         <div class="kpis" style="margin-bottom:16px;">
           ${(outcall.categories||[]).map(c => {
             const t = outcall.data[c]?.["Total"];
+            const inbound = t?.["인입"]?.[today] || 0;
             const completed = t?.["통화완료"]?.[today] || 0;
             const rate = clampPct(t?.["통화완료_%"]?.[today]);
             const surveyed = t?.["미처리"]?.[today] || 0;
-            return `<div class="kpi"><div class="label">${c}</div><div class="val">${fmtNum(completed)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtPct(rate)}</span></div>
-              <div class="delta">통화완료율 · ${fmtNum(surveyed)}건 서베이발송(부재)</div></div>`;
+            const gapPt = rate!=null ? (rate - OUTCALL_TARGET_RATE) : null;
+            const needed = Math.max(0, Math.ceil(inbound*OUTCALL_TARGET_RATE) - completed);
+            const wowInbound = wowDate!=null ? (t?.["인입"]?.[wowDate] || 0) : null;
+            const wowCompleted = wowDate!=null ? (t?.["통화완료"]?.[wowDate] || 0) : null;
+            return `<div class="kpi"><div class="label">${c}</div>
+              <div class="val">${fmtNum(completed)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtPct(rate)}</span></div>
+              <div class="delta">인입 ${fmtNum(inbound)}건 · 부재(서베이발송) ${fmtNum(surveyed)}건</div>
+              <div class="delta" style="color:${gapPt==null?'var(--ink-dim)':(gapPt>=0?'var(--good)':'var(--bad)')};font-weight:700;margin-top:2px;">
+                ${gapPt!=null ? (gapPt>=0?`타겟 달성 (+${Math.round(gapPt*100)}%p)`:`타겟 미달 (${Math.round(gapPt*100)}%p · ${needed}건 부족)`) : '타겟 비교 불가'}
+              </div>
+              <div class="delta" style="font-size:11px;margin-top:2px;">${wowInbound!=null ? `전주 동요일 인입 ${fmtNum(wowInbound)}건 → ${fmtNum(inbound)}건 (${inbound-wowInbound>=0?'▲':'▼'} ${fmtNum(Math.abs(inbound-wowInbound))}건) · 완료 ${fmtNum(wowCompleted)}→${fmtNum(completed)}건` : '전주 데이터 없음'}</div>
+            </div>`;
           }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">Out Call 데이터 없음</div>'}
         </div>
         <canvas id="chartOutcall"></canvas>
@@ -1288,6 +1434,14 @@ function renderWeekly(data){
   if (outcallWeek.length){
     const worst = outcallWeek.slice().sort((a,b)=>(b.absentRate||0)-(a.absentRate||0))[0];
     if (worst && worst.absentRate!=null) weeklyInsights.push(`아웃콜 중 부재율이 가장 높은 카테고리는 <b>${worst.category}</b> (${fmtPct(worst.absentRate)})입니다.`);
+    const wMet = outcallWeek.filter(o => o.completedRate!=null && o.completedRate >= OUTCALL_TARGET_RATE).map(o=>o.category);
+    const wMiss = outcallWeek.filter(o => o.completedRate!=null && o.completedRate < OUTCALL_TARGET_RATE);
+    if (wMet.length) weeklyInsights.push(`이번 주 아웃콜 성공률 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%)을 달성한 카테고리는 <b>${wMet.join(", ")}</b>입니다.`);
+    if (wMiss.length){
+      const w = wMiss.reduce((a,b)=>b.completedRate<a.completedRate?b:a);
+      const needed = Math.max(0, Math.ceil(w.inbound*OUTCALL_TARGET_RATE) - w.completed);
+      weeklyInsights.push(`<b>${w.category}</b>은 성공률 ${fmtPct(w.completedRate)}로 타겟 미달이며, ${needed}건을 더 완료해야 타겟에 도달합니다.`);
+    }
   }
   if (issueWeek.length && issueWeek[0].total>0){
     weeklyInsights.push(`이번 주 가장 많이 발생한 이슈 카테고리는 <b>${issueWeek[0].category}</b> (${fmtNum(issueWeek[0].total)}건)입니다.`);
@@ -1303,6 +1457,21 @@ function renderWeekly(data){
       if (worst.diff < 0) weeklyInsights.push(`전주 대비 생산성이 가장 많이 떨어진 상담원은 <b>${worst.agent}</b> (▼ ${Math.abs(worst.diff).toFixed(1)}점)입니다.`);
     }
   }
+  {
+    const completedByAgent = agents.map(a => ({ agent:a, total: sum(week.dates.map(d => sections["상담완료"]?.[a]?.[d] || 0)) }));
+    const topHandler = completedByAgent.filter(x=>x.total>0).sort((a,b)=>b.total-a.total)[0];
+    if (topHandler) weeklyInsights.push(`이번 주 상담인입을 가장 많이 처리한 상담원은 <b>${topHandler.agent}</b> (${fmtNum(topHandler.total)}건)입니다.`);
+  }
+  (outcall?.categories||[]).forEach(c => {
+    const perAgent = agents.map(a => {
+      const completed = sum(week.dates.map(d => outcall.data[c]?.[a]?.["통화완료"]?.[d] || 0));
+      const inbound = sum(week.dates.map(d => outcall.data[c]?.[a]?.["인입"]?.[d] || 0));
+      return { agent:a, completed, rate: inbound>0 ? completed/inbound : null };
+    });
+    const topVolume = perAgent.filter(x=>x.completed>0).sort((a,b)=>b.completed-a.completed)[0];
+    const topRate = perAgent.filter(x=>x.rate!=null && x.completed>0).sort((a,b)=>b.rate-a.rate)[0];
+    if (topVolume) weeklyInsights.push(`${c} 아웃콜을 가장 많이 담당한 상담원은 <b>${topVolume.agent}</b> (통화완료 ${fmtNum(topVolume.completed)}건)이고, 완료율이 가장 높은 상담원은 <b>${topRate?topRate.agent:topVolume.agent}</b> (${fmtPct(topRate?topRate.rate:null)})입니다.`);
+  });
 
   const weekOptions = weeks.map(w => `<option value="${w.monday}" ${w.monday===selectedWeekMonday?'selected':''}>${dateRangeLabel(w.monday, w.saturday)}</option>`).join("");
 
@@ -1346,14 +1515,21 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>CX 아웃콜 운영현황</h2>
+      <h2>CX 아웃콜 운영현황 <span class="tag">성공률 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
       <div class="kpis">
         ${outcallWeek.map((o,i) => {
           const p = outcallWeekPrev[i];
+          const gapPt = o.completedRate!=null ? (o.completedRate - OUTCALL_TARGET_RATE) : null;
+          const needed = Math.max(0, Math.ceil(o.inbound*OUTCALL_TARGET_RATE) - o.completed);
           return `<div class="kpi"><div class="label">${o.category} 아웃 Call 응대현황</div><div class="val">${fmtNum(o.inbound)}건</div>
           <div class="delta">완료율 · ${fmtNum(o.completed)}건 ${fmtPct(o.completedRate)}</div>
           <div class="delta">부재율(서베이발송) · ${fmtNum(o.absent)}건 ${fmtPct(o.absentRate)}</div>
-          <div class="delta" style="margin-top:4px;font-size:11px;">${wowText(o.inbound, p?.inbound)}</div></div>`;
+          <div class="delta" style="color:${gapPt==null?'var(--ink-dim)':(gapPt>=0?'var(--good)':'var(--bad)')};font-weight:700;margin-top:3px;">
+            ${gapPt!=null ? (gapPt>=0?`타겟 달성 (+${Math.round(gapPt*100)}%p)`:`타겟 미달 (${Math.round(gapPt*100)}%p · ${needed}건 부족)`) : '타겟 비교 불가'}
+          </div>
+          <div class="delta" style="margin-top:4px;font-size:11px;">인입 ${wowText(o.inbound, p?.inbound)}</div>
+          <div class="delta" style="font-size:11px;">완료 ${wowText(o.completed, p?.completed)}</div>
+          <div class="delta" style="font-size:11px;">완료율 ${wowText(o.completedRate, p?.completedRate, null, true)}</div></div>`;
         }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
       </div>
     </div>
@@ -1450,7 +1626,7 @@ function renderWeekly(data){
 
 /* ===================== 월별 리포트 ===================== */
 function renderMonthly(data){
-  const { dates, sections, outcall, delay30 } = data;
+  const { dates, sections, outcall, delay30, onboardCalls } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const months = buildMonthList(dates);
   const app = document.getElementById("app");
@@ -1509,14 +1685,25 @@ function renderMonthly(data){
   const mboMonth = mboMonthStats(month.dates);
   const mboMonthPrev = mboMonthStats(prevMonth?.dates);
 
-  // 온보딩→2·5발주 전환 추이 (전체 기간, 주별 통화완료 건수)
-  const funnelWeeks = buildWeekList(dates);
-  const funnelData = funnelWeeks.map(w => {
-    const row = { label: dateRangeLabel(w.monday, w.saturday) };
-    (outcall?.categories||[]).forEach(c => {
-      row[c] = sum(w.dates.map(d => outcall.data[c]?.["Total"]?.["통화완료"]?.[d] || 0));
-    });
-    return row;
+  // 모바일 레터링 도입(8/11) 전후 아웃콜 성과 비교 - 전체 기간 기준
+  function mdKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; }
+  const letteringKey = mdKey(LETTERING_START);
+  const beforeDates = dates.filter(d => mdKey(d) < letteringKey);
+  const afterDates = dates.filter(d => mdKey(d) >= letteringKey);
+  const letteringCompare = (outcall?.categories||[]).map(c => {
+    const t = outcall.data[c]?.["Total"];
+    const agg = (ds) => {
+      const inbound = sum(ds.map(d => t?.["인입"]?.[d] || 0));
+      const completed = sum(ds.map(d => t?.["통화완료"]?.[d] || 0));
+      return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
+    };
+    const b = agg(beforeDates), a = agg(afterDates);
+    return {
+      category: c,
+      beforeInbound: b.inbound, beforeRate: b.rate,
+      afterInbound: a.inbound, afterRate: a.rate,
+      diff: (b.rate!=null && a.rate!=null) ? a.rate - b.rate : null
+    };
   });
 
   function delayStats(dSet){
@@ -1563,6 +1750,54 @@ function renderMonthly(data){
   }
   if (issueMonth.length && issueMonth[0].total>0){
     monthlyInsights.push(`${month.label} 가장 많이 발생한 이슈 카테고리는 <b>${issueMonth[0].category}</b> (${fmtNum(issueMonth[0].total)}건)입니다.`);
+  }
+  {
+    const completedByAgent = agents.map(a => ({ agent:a, total: sum(month.dates.map(d => sections["상담완료"]?.[a]?.[d] || 0)) }));
+    const topHandler = completedByAgent.filter(x=>x.total>0).sort((a,b)=>b.total-a.total)[0];
+    if (topHandler) monthlyInsights.push(`${month.label} 상담인입을 가장 많이 처리한 상담원은 <b>${topHandler.agent}</b> (${fmtNum(topHandler.total)}건)입니다.`);
+  }
+  (outcall?.categories||[]).forEach(c => {
+    const perAgent = agents.map(a => {
+      const completed = sum(month.dates.map(d => outcall.data[c]?.[a]?.["통화완료"]?.[d] || 0));
+      const inbound = sum(month.dates.map(d => outcall.data[c]?.[a]?.["인입"]?.[d] || 0));
+      return { agent:a, completed, rate: inbound>0 ? completed/inbound : null };
+    });
+    const topVolume = perAgent.filter(x=>x.completed>0).sort((a,b)=>b.completed-a.completed)[0];
+    const topRate = perAgent.filter(x=>x.rate!=null && x.completed>0).sort((a,b)=>b.rate-a.rate)[0];
+    if (topVolume) monthlyInsights.push(`${c} 아웃콜을 가장 많이 담당한 상담원은 <b>${topVolume.agent}</b> (통화완료 ${fmtNum(topVolume.completed)}건)이고, 완료율이 가장 높은 상담원은 <b>${topRate?topRate.agent:topVolume.agent}</b> (${fmtPct(topRate?topRate.rate:null)})입니다.`);
+  });
+  {
+    const mMet = outcallMonth.filter(o => o.completedRate!=null && o.completedRate >= OUTCALL_TARGET_RATE).map(o=>o.category);
+    const mMiss = outcallMonth.filter(o => o.completedRate!=null && o.completedRate < OUTCALL_TARGET_RATE);
+    if (mMet.length) monthlyInsights.push(`${month.label} 아웃콜 성공률 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%)을 달성한 카테고리는 <b>${mMet.join(", ")}</b>입니다.`);
+    if (mMiss.length){
+      const w = mMiss.reduce((a,b)=>b.completedRate<a.completedRate?b:a);
+      const needed = Math.max(0, Math.ceil(w.inbound*OUTCALL_TARGET_RATE) - w.completed);
+      monthlyInsights.push(`<b>${w.category}</b>은 성공률 ${fmtPct(w.completedRate)}로 타겟 미달이며, ${needed}건을 더 완료해야 타겟에 도달합니다.`);
+    }
+    const improved = letteringCompare.filter(l => l.diff!=null && l.diff>0).sort((a,b)=>b.diff-a.diff);
+    if (improved.length){
+      const t = improved[0];
+      monthlyInsights.push(`모바일 레터링 도입(${LETTERING_START}) 이후 <b>${t.category}</b> 통화완료율이 ${fmtPct(t.beforeRate)} → ${fmtPct(t.afterRate)}로 ▲ ${Math.round(t.diff*100)}%p 개선되었습니다.`);
+    }
+  }
+
+  // 아웃콜 시간대별 성공률 + 온보딩 전환율 (전체 기간 기준)
+  const hourlyStats = outcallHourlyStats(onboardCalls);
+  const conversion = onboardConversion(onboardCalls);
+  const hourlyCats = Object.keys(hourlyStats);
+  hourlyCats.forEach(cat => {
+    const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
+    const eligible = hours.filter(h => hourlyStats[cat][h].total >= 10);
+    if (!eligible.length) return;
+    const best = eligible.reduce((a,b) => (hourlyStats[cat][b].success/hourlyStats[cat][b].total) > (hourlyStats[cat][a].success/hourlyStats[cat][a].total) ? b : a);
+    const bs = hourlyStats[cat][best];
+    monthlyInsights.push(`<b>${cat}</b> 아웃콜은 <b>${best}시</b>에 통화 성공률이 가장 높습니다 (${Math.round(bs.success/bs.total*100)}% · ${bs.total}건 기준).`);
+  });
+  if (conversion.base > 0){
+    const t2 = conversion.targets["2발주"], t5 = conversion.targets["5발주"];
+    monthlyInsights.push(`온보딩 업장 ${fmtNum(conversion.base)}곳 중 <b>${fmtPct(t2.rate)}</b>가 2발주로 전환되었으며, 평균 <b>${t2.avgLead!=null?t2.avgLead.toFixed(1):'-'}일</b> 만에 전환되었습니다.`);
+    monthlyInsights.push(`5발주 전환율은 <b>${fmtPct(t5.rate)}</b>이며, 평균 리드타임은 <b>${t5.avgLead!=null?t5.avgLead.toFixed(1):'-'}일</b>입니다.`);
   }
 
   const monthOptions = months.map(m => `<option value="${m.key}" ${m.key===selectedMonthKey?'selected':''}>${m.label}</option>`).join("");
@@ -1619,25 +1854,85 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>CX 아웃콜 운영현황 (월간)</h2>
+      <h2>CX 아웃콜 운영현황 (월간) <span class="tag">성공률 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
       <div class="kpis">
         ${outcallMonth.map((o,i) => {
           const p = outcallMonthPrev[i];
+          const gapPt = o.completedRate!=null ? (o.completedRate - OUTCALL_TARGET_RATE) : null;
+          const needed = Math.max(0, Math.ceil(o.inbound*OUTCALL_TARGET_RATE) - o.completed);
           return `<div class="kpi"><div class="label">${o.category} 아웃 Call 응대현황</div><div class="val">${fmtNum(o.inbound)}건</div>
           <div class="delta">완료율 · ${fmtNum(o.completed)}건 ${fmtPct(o.completedRate)}</div>
           <div class="delta">부재율(서베이발송) · ${fmtNum(o.absent)}건 ${fmtPct(o.absentRate)}</div>
-          <div class="delta" style="margin-top:4px;font-size:11px;">${wowText(o.inbound, p?.inbound)}</div></div>`;
+          <div class="delta" style="color:${gapPt==null?'var(--ink-dim)':(gapPt>=0?'var(--good)':'var(--bad)')};font-weight:700;margin-top:3px;">
+            ${gapPt!=null ? (gapPt>=0?`타겟 달성 (+${Math.round(gapPt*100)}%p)`:`타겟 미달 (${Math.round(gapPt*100)}%p · ${needed}건 부족)`) : '타겟 비교 불가'}
+          </div>
+          <div class="delta" style="margin-top:4px;font-size:11px;">인입 ${wowText(o.inbound, p?.inbound)}</div>
+          <div class="delta" style="font-size:11px;">완료 ${wowText(o.completed, p?.completed)}</div>
+          <div class="delta" style="font-size:11px;">완료율 ${wowText(o.completedRate, p?.completedRate, null, true)}</div></div>`;
         }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
       </div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>온보딩 → 2·5발주 전환 추이 <span class="tag">주별 통화완료 건수 비교</span></h2>
-      <canvas id="chartOnboardFunnel"></canvas>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-        Out Call_Tracking은 카테고리(신규온보딩/2발주/5발주)별 집계만 제공되어, 이 차트는 <b>업장 단위 추적이 아닌 주별 볼륨 추이로 전환 흐름을 가늠하는 참고 지표</b>입니다.
-        온보딩콜을 받은 "그 업장"이 실제로 2·5발주를 했는지 업장 단위로 정확히 보시려면, 업장 식별자가 포함된 원본 데이터 연동이 필요합니다 — 필요하시면 알려주세요.
+      <h2>아웃콜 시간대별 통화 결과 <span class="tag">전체 기간 · 타임스탬프 중복 30분 분산 보정 적용</span></h2>
+      ${hourlyCats.map(cat => {
+        const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
+        const maxRate = Math.max(...hours.map(h => hourlyStats[cat][h].total>0 ? hourlyStats[cat][h].success/hourlyStats[cat][h].total : 0));
+        return `
+        <div style="margin-bottom:18px;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${cat}</div>
+          <table style="font-size:12px;">
+            <thead><tr><th>시간</th><th>총 콜</th><th>콜완료</th><th>성공률</th><th></th><th>결과 분포</th></tr></thead>
+            <tbody>
+              ${hours.map(h => {
+                const s = hourlyStats[cat][h];
+                const rate = s.total>0 ? s.success/s.total : 0;
+                const isBest = s.total>=10 && rate>=maxRate;
+                return `<tr>
+                  <td style="text-align:left;${isBest?'color:var(--good);font-weight:700;':''}">${h}시${isBest?' ★':''}</td>
+                  <td>${s.total}</td><td>${s.success}</td>
+                  <td style="${isBest?'color:var(--good);font-weight:700;':''}">${Math.round(rate*100)}%</td>
+                  <td style="width:25%;"><div style="background:${isBest?'#2FBF8F':'#4C6EF5'};height:12px;border-radius:3px;width:${Math.round(rate*100)}%;"></div></td>
+                  <td style="text-align:left;color:var(--ink-dim);font-size:11px;">${Object.entries(s.results).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k} ${v}`).join(" · ")}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>`;
+      }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">온보딩 아웃콜 데이터를 불러오지 못했습니다.</div>'}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>온보딩 → 발주 전환율 <span class="tag">회원ID 우선 · 미보유 시 업장명 매칭 · 전체 기간</span></h2>
+      <div class="kpis">
+        <div class="kpi"><div class="label">온보딩 진행 업장</div><div class="val">${fmtNum(conversion.base)}</div>
+          <div class="delta">전환율 산정 모수</div></div>
+        ${["2발주","5발주"].map(t => {
+          const s = conversion.targets[t];
+          return `<div class="kpi"><div class="label">${t} 전환</div>
+            <div class="val">${fmtPct(s.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(s.hits)}건</span></div>
+            <div class="delta">평균 리드타임 ${s.avgLead!=null?s.avgLead.toFixed(1)+'일':'-'} · 중앙값 ${s.medLead!=null?s.medLead+'일':'-'}</div></div>`;
+        }).join("")}
       </div>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:12px;line-height:1.6;">
+        리드타임 = 신규온보딩 콜 진행일로부터 해당 발주 콜까지 걸린 일수 · 업장명 매칭 건은 지점 표기 차이로 일부 누락될 수 있습니다.
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>모바일 레터링 도입 전후 비교 <span class="tag">${LETTERING_START} 운영 시작 기준 · 전체 기간</span></h2>
+      <table>
+        <thead><tr><th>카테고리</th><th>도입 전 인입</th><th>도입 전 완료율</th><th>도입 후 인입</th><th>도입 후 완료율</th><th>변화</th></tr></thead>
+        <tbody>
+          ${letteringCompare.map(l => `<tr>
+            <td style="text-align:left;">${l.category}</td>
+            <td>${fmtNum(l.beforeInbound)}</td><td>${fmtPct(l.beforeRate)}</td>
+            <td>${fmtNum(l.afterInbound)}</td><td>${fmtPct(l.afterRate)}</td>
+            <td style="color:${l.diff==null?'var(--ink-dim)':(l.diff>=0?'var(--good)':'var(--bad)')};font-weight:700;">${l.diff!=null ? (l.diff>=0?'▲ ':'▼ ')+Math.abs(Math.round(l.diff*100))+'%p' : '-'}</td>
+          </tr>`).join("") || '<tr><td colspan="6" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">도입 전(~${LETTERING_START} 이전) vs 도입 후(${LETTERING_START} 이후) 전체 기간 아웃콜 통화완료율 비교입니다.</div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -1697,28 +1992,6 @@ function renderMonthly(data){
         datasets: [{ data: perDay, backgroundColor: "#4C6EF588", borderRadius: 3 }]
       },
       options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}, ticks:{color:tickColor, maxRotation:90, minRotation:90}} } }
-    });
-  }
-
-  const funnelCanvas = document.getElementById("chartOnboardFunnel");
-  if (funnelCanvas && funnelData.length){
-    const cats = outcall?.categories || [];
-    const palette = { "신규온보딩":"#4C6EF5", "2발주":"#12B886", "5발주":"#F76707" };
-    charts.onboardFunnel = new Chart(funnelCanvas, {
-      type: "line",
-      data: {
-        labels: funnelData.map(f => f.label),
-        datasets: cats.map(c => ({
-          label: c,
-          data: funnelData.map(f => f[c] || 0),
-          borderColor: palette[c] || "#748FFC",
-          backgroundColor: palette[c] || "#748FFC",
-          tension: .3,
-          pointRadius: 3
-        }))
-      },
-      options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-        scales:{ x:{grid:{display:false}, ticks:{font:{size:9}}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"통화완료 건수",font:{size:10}} } } }
     });
   }
 }
