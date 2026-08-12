@@ -399,9 +399,20 @@ function parseOnboardCalls(text){
   function parseDT(v){
     v = (v||"").trim();
     if (!v) return null;
-    const m = v.match(/^(\d{4})[-.\/]\s*(\d{1,2})[-.\/]\s*(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-    if (!m) return null;
-    return new Date(+m[1], +m[2]-1, +m[3], +(m[4]||0), +(m[5]||0), +(m[6]||0));
+    // 날짜부: 2026-07-13 / 2026. 7. 13 / 2026/7/13
+    const dm = v.match(/(\d{4})[-.\/]\s*(\d{1,2})[-.\/]\s*(\d{1,2})/);
+    if (!dm) return null;
+    let hh = 0, mm = 0, ss = 0;
+    // 시간부: "오후 3:09:51", "15:09:51.290000", "3:09 PM" 등 모두 대응
+    const rest = v.slice(dm.index + dm[0].length);
+    const tm = rest.match(/(오전|오후|AM|PM|am|pm)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (tm){
+      hh = +tm[2]; mm = +tm[3]; ss = +(tm[4]||0);
+      const mer = tm[1];
+      if (mer === "오후" || mer === "PM" || mer === "pm"){ if (hh < 12) hh += 12; }
+      else if (mer === "오전" || mer === "AM" || mer === "am"){ if (hh === 12) hh = 0; }
+    }
+    return new Date(+dm[1], +dm[2]-1, +dm[3], hh, mm, ss);
   }
 
   const out = [];
@@ -582,6 +593,81 @@ function onboardConversion(onboardCalls, dateFilter){
   return result;
 }
 
+// 시간대별 통화 결과 카드 (일/주/월 공용)
+function buildHourlyCardHTML(hourlyStats, scopeLabel){
+  const cats = Object.keys(hourlyStats);
+  if (!cats.length) return `<div style="color:var(--ink-dim);font-size:13px;">해당 기간 아웃콜 데이터가 없습니다.</div>`;
+  const MIN_SAMPLE = 5;
+  let html = `<div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.7;">
+    <b style="color:var(--accent);">이 표를 보는 법</b><br>
+    같은 아웃콜이라도 <b>거는 시간대에 따라 고객이 전화를 받는 비율이 다릅니다.</b>
+    성공률이 높은 시간대(★)에 콜을 집중하면 같은 인원으로 더 많은 고객과 연결될 수 있습니다.
+    성공률 = 콜완료 ÷ 총 콜 (부재·통화거부·수신거부는 실패로 집계, ${MIN_SAMPLE}건 이상 시간대만 ★ 후보)
+  </div>`;
+  cats.forEach(cat => {
+    const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
+    const eligible = hours.filter(h => hourlyStats[cat][h].total >= MIN_SAMPLE);
+    const bestHour = eligible.length ? eligible.reduce((a,b) =>
+      (hourlyStats[cat][b].success/hourlyStats[cat][b].total) > (hourlyStats[cat][a].success/hourlyStats[cat][a].total) ? b : a) : null;
+    const worstHour = eligible.length ? eligible.reduce((a,b) =>
+      (hourlyStats[cat][b].success/hourlyStats[cat][b].total) < (hourlyStats[cat][a].success/hourlyStats[cat][a].total) ? b : a) : null;
+    html += `<div style="margin-bottom:20px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${cat}</div>
+      ${bestHour!=null ? `<div style="font-size:12px;color:var(--good);margin-bottom:8px;font-weight:600;">
+        ★ ${bestHour}시가 가장 전화를 잘 받는 시간대입니다 (성공률 ${Math.round(hourlyStats[cat][bestHour].success/hourlyStats[cat][bestHour].total*100)}%)
+        ${worstHour!=null && worstHour!==bestHour ? `<span style="color:var(--bad);"> · ${worstHour}시는 가장 낮습니다 (${Math.round(hourlyStats[cat][worstHour].success/hourlyStats[cat][worstHour].total*100)}%)</span>` : ''}
+      </div>` : ''}
+      <table style="font-size:12px;">
+        <thead><tr><th>시간</th><th>총 콜</th><th>콜완료</th><th>성공률</th><th></th><th>결과 분포</th></tr></thead>
+        <tbody>
+          ${hours.map(h => {
+            const s = hourlyStats[cat][h];
+            const rate = s.total>0 ? s.success/s.total : 0;
+            const isBest = h === bestHour;
+            return `<tr>
+              <td style="text-align:left;${isBest?'color:var(--good);font-weight:700;':''}">${h}시${isBest?' ★':''}</td>
+              <td>${s.total}</td><td>${s.success}</td>
+              <td style="${isBest?'color:var(--good);font-weight:700;':''}">${Math.round(rate*100)}%</td>
+              <td style="width:22%;"><div style="background:${isBest?'#2FBF8F':'#4C6EF5'};height:12px;border-radius:3px;width:${Math.round(rate*100)}%;"></div></td>
+              <td style="text-align:left;color:var(--ink-dim);font-size:11px;">${Object.entries(s.results).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k} ${v}`).join(" · ")}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>`;
+  });
+  return html;
+}
+
+// 온보딩 → 발주 전환율 카드 (일/주/월 공용)
+function buildConversionCardHTML(conversion){
+  if (!conversion || !conversion.base) return `<div style="color:var(--ink-dim);font-size:13px;">해당 기간 온보딩 데이터가 없습니다.</div>`;
+  const t2 = conversion.targets["2발주"], t5 = conversion.targets["5발주"];
+  return `
+    <div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.7;">
+      <b style="color:var(--accent);">이 지표를 보는 법</b><br>
+      신규 온보딩 콜을 받은 업장이 이후 실제로 <b>2발주·5발주까지 이어졌는지</b>를 업장 단위로 추적한 결과입니다.<br>
+      · <b>전환율</b> = 온보딩한 업장 중 해당 발주 단계까지 도달한 비율 (높을수록 온보딩이 실제 매출로 연결됨)<br>
+      · <b>리드타임</b> = 온보딩 콜 이후 그 단계에 도달하기까지 걸린 일수 (짧을수록 빠르게 안착)
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="label">온보딩 진행 업장</div><div class="val">${fmtNum(conversion.base)}</div>
+        <div class="delta">전환율 계산의 기준(모수)</div></div>
+      <div class="kpi"><div class="label">2발주 전환</div>
+        <div class="val">${fmtPct(t2.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(t2.hits)}곳</span></div>
+        <div class="delta">온보딩 ${fmtNum(conversion.base)}곳 중 ${fmtNum(t2.hits)}곳이 2발주까지 진행</div>
+        <div class="delta" style="color:var(--accent);font-weight:600;">평균 ${t2.avgLead!=null?t2.avgLead.toFixed(1)+'일':'-'} 만에 전환 (중앙값 ${t2.medLead!=null?t2.medLead+'일':'-'})</div></div>
+      <div class="kpi"><div class="label">5발주 전환</div>
+        <div class="val">${fmtPct(t5.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(t5.hits)}곳</span></div>
+        <div class="delta">온보딩 ${fmtNum(conversion.base)}곳 중 ${fmtNum(t5.hits)}곳이 5발주까지 진행</div>
+        <div class="delta" style="color:var(--accent);font-weight:600;">평균 ${t5.avgLead!=null?t5.avgLead.toFixed(1)+'일':'-'} 만에 전환 (중앙값 ${t5.medLead!=null?t5.medLead+'일':'-'})</div></div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-dim);margin-top:12px;line-height:1.6;">
+      업장 매칭은 회원ID를 우선 사용하고, ID가 없는 건은 업장명으로 매칭합니다. 지점 표기가 다른 경우 일부 누락될 수 있습니다.
+    </div>
+  `;
+}
+
 function renderInsightList(insights){
   if (!insights.length) return '<li style="color:var(--ink-dim);">인사이트를 생성할 데이터가 부족합니다.</li>';
   return insights.map(i => {
@@ -760,7 +846,7 @@ function buildWeekList(dates){
 function render(data){
   if (viewMode === "weekly"){ renderWeekly(data); return; }
   if (viewMode === "monthly"){ renderMonthly(data); return; }
-  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold, rawLog } = data;
+  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold, rawLog, onboardCalls } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
 
   let todayIdx;
@@ -1030,6 +1116,8 @@ function render(data){
   // MBO 공통 목표 달성 현황 (오늘 + 최근 기간 흐름)
   const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
   const mboToday = Object.fromEntries(mboAgents.map(a => [a, mboScoresForAgent(sections, delay30, outcall, a, today)]));
+  const hourlyStatsToday = outcallHourlyStats(onboardCalls, d => d.dateMD === today);
+  const conversionAll = onboardConversion(onboardCalls);
   const mboTrend = recentDates.map(d => {
     const dayScores = mboAgents.map(a => mboScoresForAgent(sections, delay30, outcall, a, d).weighted).filter(v=>v!=null);
     return dayScores.length ? sum(dayScores)/dayScores.length : null;
@@ -1187,6 +1275,20 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
+        <h2>아웃콜 시간대별 통화 결과 <span class="tag">${dateLabel(today)} · 타임스탬프 중복 30분 분산 보정 적용</span></h2>
+        ${buildHourlyCardHTML(hourlyStatsToday)}
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간 누적 (리드타임 특성상 일별 산정 불가)</span></h2>
+        ${buildConversionCardHTML(conversionAll)}
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
         <h2>MBO 공통 목표 달성 현황 <span class="tag">${dateLabel(today)} · 클레임율 97%↑ · 지연율 3%↓ · 아웃콜 100%</span></h2>
         <table>
           <thead><tr><th>상담원</th><th>데일리 클레임율</th><th>달성률</th><th>30분 지연율</th><th>달성률</th><th>온보딩 아웃콜</th><th>달성률</th><th>종합 가중점수</th></tr></thead>
@@ -1311,7 +1413,7 @@ function destroyCharts(){
 
 /* ===================== 주간 리포트 ===================== */
 function renderWeekly(data){
-  const { dates, sections, outcall, delay30, schedule, rawLog } = data;
+  const { dates, sections, outcall, delay30, schedule, rawLog, onboardCalls } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const weeks = buildWeekList(dates);
   const app = document.getElementById("app");
@@ -1416,6 +1518,9 @@ function renderWeekly(data){
     return out;
   }
   const mboWeek = mboWeekStats(week);
+  const weekDateSet = new Set(week.dates);
+  const hourlyStatsWeek = outcallHourlyStats(onboardCalls, d => weekDateSet.has(d.dateMD));
+  const conversionAllW = onboardConversion(onboardCalls);
   const mboWeekPrev = mboWeekStats(prevWeek);
 
   const weeklyInsights = [];
@@ -1584,6 +1689,16 @@ function renderWeekly(data){
           }).join("")}
         </tbody>
       </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>아웃콜 시간대별 통화 결과 <span class="tag">${dateRangeLabel(week.monday, week.saturday)} · 타임스탬프 중복 30분 분산 보정 적용</span></h2>
+      ${buildHourlyCardHTML(hourlyStatsWeek)}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간 누적 (리드타임 특성상 주간 단독 산정 불가)</span></h2>
+      ${buildConversionCardHTML(conversionAllW)}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -1875,48 +1990,12 @@ function renderMonthly(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>아웃콜 시간대별 통화 결과 <span class="tag">전체 기간 · 타임스탬프 중복 30분 분산 보정 적용</span></h2>
-      ${hourlyCats.map(cat => {
-        const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
-        const maxRate = Math.max(...hours.map(h => hourlyStats[cat][h].total>0 ? hourlyStats[cat][h].success/hourlyStats[cat][h].total : 0));
-        return `
-        <div style="margin-bottom:18px;">
-          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${cat}</div>
-          <table style="font-size:12px;">
-            <thead><tr><th>시간</th><th>총 콜</th><th>콜완료</th><th>성공률</th><th></th><th>결과 분포</th></tr></thead>
-            <tbody>
-              ${hours.map(h => {
-                const s = hourlyStats[cat][h];
-                const rate = s.total>0 ? s.success/s.total : 0;
-                const isBest = s.total>=10 && rate>=maxRate;
-                return `<tr>
-                  <td style="text-align:left;${isBest?'color:var(--good);font-weight:700;':''}">${h}시${isBest?' ★':''}</td>
-                  <td>${s.total}</td><td>${s.success}</td>
-                  <td style="${isBest?'color:var(--good);font-weight:700;':''}">${Math.round(rate*100)}%</td>
-                  <td style="width:25%;"><div style="background:${isBest?'#2FBF8F':'#4C6EF5'};height:12px;border-radius:3px;width:${Math.round(rate*100)}%;"></div></td>
-                  <td style="text-align:left;color:var(--ink-dim);font-size:11px;">${Object.entries(s.results).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k} ${v}`).join(" · ")}</td>
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table>
-        </div>`;
-      }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">온보딩 아웃콜 데이터를 불러오지 못했습니다.</div>'}
+      ${buildHourlyCardHTML(hourlyStats)}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>온보딩 → 발주 전환율 <span class="tag">회원ID 우선 · 미보유 시 업장명 매칭 · 전체 기간</span></h2>
-      <div class="kpis">
-        <div class="kpi"><div class="label">온보딩 진행 업장</div><div class="val">${fmtNum(conversion.base)}</div>
-          <div class="delta">전환율 산정 모수</div></div>
-        ${["2발주","5발주"].map(t => {
-          const s = conversion.targets[t];
-          return `<div class="kpi"><div class="label">${t} 전환</div>
-            <div class="val">${fmtPct(s.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(s.hits)}건</span></div>
-            <div class="delta">평균 리드타임 ${s.avgLead!=null?s.avgLead.toFixed(1)+'일':'-'} · 중앙값 ${s.medLead!=null?s.medLead+'일':'-'}</div></div>`;
-        }).join("")}
-      </div>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:12px;line-height:1.6;">
-        리드타임 = 신규온보딩 콜 진행일로부터 해당 발주 콜까지 걸린 일수 · 업장명 매칭 건은 지점 표기 차이로 일부 누락될 수 있습니다.
-      </div>
+      <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간</span></h2>
+      ${buildConversionCardHTML(conversion)}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
