@@ -184,6 +184,99 @@ function mboScoresForAgent(sections, delay30, outcall, agent, date){
   }
   return { claimRate, delayRate, leadMin, outcallRate, aClaim, aDelay, aOutcall, weighted, weights:w };
 }
+
+// 기간(날짜 배열) 합산 기준 MBO 세부 수치 - 일/주/월 공용, 원본 시트의 "Total 상담건/처리율" 방식과 동일하게 기간 합산 후 비율 계산
+function mboDetailForAgentPeriod(sections, delay30, outcall, agent, dateArr){
+  const inbound = sum(dateArr.map(d => sections["상담인입"]?.[agent]?.[d] || 0));
+  const completed = sum(dateArr.map(d => sections["상담완료"]?.[agent]?.[d] || 0));
+  const claimRate = inbound>0 ? completed/inbound : null;
+
+  const delayCnt = sum(dateArr.map(d => sections["30분 이상 지연"]?.[agent]?.[d] || 0));
+  const delayRate = completed>0 ? delayCnt/completed : (delayCnt>0 ? 1 : 0);
+  const leadMins = [];
+  dateArr.forEach(d => {
+    (delay30||[]).filter(r => r.agent===agent && r.date===d).forEach(r => {
+      const m = durationToMinutes(r.duration);
+      if (m!=null) leadMins.push(m);
+    });
+  });
+  const leadMin = leadMins.length ? sum(leadMins)/leadMins.length : null;
+
+  const outcallDetail = {};
+  (outcall?.categories||[]).forEach(c => {
+    const inb = sum(dateArr.map(d => outcall.data[c]?.[agent]?.["인입"]?.[d] || 0));
+    const comp = sum(dateArr.map(d => outcall.data[c]?.[agent]?.["통화완료"]?.[d] || 0));
+    const surv = sum(dateArr.map(d => outcall.data[c]?.[agent]?.["미처리"]?.[d] || 0));
+    outcallDetail[c] = { inbound: inb, completed: comp, completedRate: inb>0?comp/inb:null, surveyed: surv, surveyRate: inb>0?surv/inb:null };
+  });
+  const outInboundTotal = sum(Object.values(outcallDetail).map(o=>o.inbound));
+  const outCompletedTotal = sum(Object.values(outcallDetail).map(o=>o.completed));
+  const outSurveyedTotal = sum(Object.values(outcallDetail).map(o=>o.surveyed));
+  const outcallRate = outInboundTotal>0 ? (outCompletedTotal+outSurveyedTotal)/outInboundTotal : null;
+
+  const w = MBO_WEIGHTS[agent];
+  const aClaim = achieveClaimRate(claimRate);
+  const aDelay = achieveDelay(delayRate, leadMin);
+  const aOutcall = achieveOutcall(outcallRate);
+  let weighted = null;
+  if (w && aClaim!=null && aDelay!=null && aOutcall!=null){
+    const totalW = w.claim + w.delay + w.outcall;
+    weighted = (aClaim*w.claim + aDelay*w.delay + aOutcall*w.outcall) / totalW;
+  }
+  return {
+    inbound, completed, claimRate, aClaim,
+    delayCnt, delayRate, leadMin, aDelay,
+    outcallDetail, outInboundTotal, outCompletedTotal, outSurveyedTotal, outcallRate, aOutcall,
+    weighted, weights: w
+  };
+}
+
+function achieveBadge(a){
+  if (a == null) return `<span style="color:var(--ink-dim);">-</span>`;
+  const color = a>=1 ? 'var(--good)' : a>=0.7 ? 'var(--accent)' : 'var(--bad)';
+  return `<span style="color:${color};font-weight:700;">${Math.round(a*100)}%</span>`;
+}
+
+// MBO 세부 카드 - 담당자 1명분 (일/주/월 공용)
+function buildMboDetailCardHTML(agent, d, periodLabel){
+  const w = d.weights || {};
+  return `
+    <div style="background:var(--panel-2);border-radius:10px;padding:16px;margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
+        <div style="font-weight:700;font-size:14.5px;">${agent}</div>
+        <div style="font-size:13px;">종합 가중점수 <span style="font-weight:800;color:var(--accent);font-size:16px;">${d.weighted!=null?Math.round(d.weighted*100)+'%':'-'}</span></div>
+      </div>
+
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">데일리 클레임율 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.claim!=null?w.claim:'-'})</span></div>
+      <table style="font-size:12.5px;margin-bottom:14px;">
+        <thead><tr><th>${periodLabel} 상담건(인입)</th><th>상담완료</th><th>완료율(클레임율)</th><th>달성률</th></tr></thead>
+        <tbody><tr><td>${fmtNum(d.inbound)}</td><td>${fmtNum(d.completed)}</td><td>${fmtPct(d.claimRate)}</td><td>${achieveBadge(d.aClaim)}</td></tr></tbody>
+      </table>
+
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">30분 응대지연 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.delay!=null?w.delay:'-'})</span></div>
+      <table style="font-size:12.5px;margin-bottom:14px;">
+        <thead><tr><th>상담완료 대비</th><th>30분 지연건수</th><th>지연 비율</th><th>평균 리드타임</th><th>달성률</th></tr></thead>
+        <tbody><tr><td>${fmtNum(d.completed)}건</td><td>${fmtNum(d.delayCnt)}</td><td>${fmtPct(d.delayRate)}</td><td>${d.leadMin!=null?d.leadMin.toFixed(1)+'분':'-'}</td><td>${achieveBadge(d.aDelay)}</td></tr></tbody>
+      </table>
+
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">온보딩 아웃콜 완료 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.outcall!=null?w.outcall:'-'})</span></div>
+      <table style="font-size:12.5px;">
+        <thead><tr><th>카테고리</th><th>응대(인입)</th><th>통화완료</th><th>완료율</th><th>부재(서베이)</th><th>부재율</th></tr></thead>
+        <tbody>
+          ${Object.entries(d.outcallDetail).map(([c,o]) => `<tr>
+            <td style="text-align:left;">${catLabel(c)}</td>
+            <td>${fmtNum(o.inbound)}</td>
+            <td>${fmtNum(o.completed)}</td><td>${fmtPct(o.completedRate)}</td>
+            <td>${fmtNum(o.surveyed)}</td><td>${fmtPct(o.surveyRate)}</td>
+          </tr>`).join("")}
+          <tr style="font-weight:700;"><td style="text-align:left;">합계(처리율)</td><td>${fmtNum(d.outInboundTotal)}</td>
+            <td>${fmtNum(d.outCompletedTotal)}</td><td>-</td><td>${fmtNum(d.outSurveyedTotal)}</td><td>-</td></tr>
+        </tbody>
+      </table>
+      <div style="font-size:12px;margin-top:8px;">처리율(완료+부재 ÷ 인입) <span style="font-weight:700;">${fmtPct(d.outcallRate)}</span> · 달성률 ${achieveBadge(d.aOutcall)}</div>
+    </div>
+  `;
+}
 const STATE_LABELS = { closed:"종료", missed:"미처리 상담", initial:"인입 대기", opened:"처리중", snoozed:"보류" };
 const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아웃콜/지연 시트)
 const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
@@ -1126,6 +1219,7 @@ function render(data){
   // MBO 공통 목표 달성 현황 (오늘 + 최근 기간 흐름)
   const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
   const mboToday = Object.fromEntries(mboAgents.map(a => [a, mboScoresForAgent(sections, delay30, outcall, a, today)]));
+  const mboDetailToday = Object.fromEntries(mboAgents.map(a => [a, mboDetailForAgentPeriod(sections, delay30, outcall, a, [today])]));
   const hourlyStatsToday = outcallHourlyStats(onboardCalls, d => d.dateMD === today);
   const conversionAll = onboardConversion(onboardCalls);
   const mboTrend = recentDates.map(d => {
@@ -1300,25 +1394,13 @@ function render(data){
     <div class="grid1">
       <div class="card">
         <h2>MBO 공통 목표 달성 현황 <span class="tag">${dateLabel(today)} · 클레임율 97%↑ · 지연율 3%↓ · 아웃콜 100%</span></h2>
-        <table>
-          <thead><tr><th>상담원</th><th>데일리 클레임율</th><th>달성률</th><th>30분 지연율</th><th>달성률</th><th>온보딩 아웃콜</th><th>달성률</th><th>종합 가중점수</th></tr></thead>
-          <tbody>
-            ${mboAgents.map(a => {
-              const s = mboToday[a];
-              return `<tr><td style="text-align:left;">${a}</td>
-                <td>${fmtPct(s.claimRate)}</td><td style="color:${s.aClaim==null?'inherit':(s.aClaim>=1?'var(--good)':s.aClaim>=0.7?'var(--accent)':'var(--bad)')}">${s.aClaim!=null?Math.round(s.aClaim*100)+'%':'-'}</td>
-                <td>${fmtPct(s.delayRate)}</td><td style="color:${s.aDelay==null?'inherit':(s.aDelay>=1?'var(--good)':s.aDelay>=0.7?'var(--accent)':'var(--bad)')}">${s.aDelay!=null?Math.round(s.aDelay*100)+'%':'-'}</td>
-                <td>${fmtPct(s.outcallRate)}</td><td style="color:${s.aOutcall==null?'inherit':(s.aOutcall>=1?'var(--good)':s.aOutcall>=0.7?'var(--accent)':'var(--bad)')}">${s.aOutcall!=null?Math.round(s.aOutcall*100)+'%':'-'}</td>
-                <td style="font-weight:700;color:var(--accent);">${s.weighted!=null?Math.round(s.weighted*100)+'%':'-'}</td></tr>`;
-            }).join("")}
-          </tbody>
-        </table>
+        ${mboAgents.map(a => buildMboDetailCardHTML(a, mboDetailToday[a], "당일")).join("")}
         <div style="margin-top:16px;">
           <div style="font-size:13px;font-weight:600;margin-bottom:10px;">목표 달성률 흐름 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 최근 ${recentDates.length}일 · 상담원 평균 종합 가중점수</span></div>
           <canvas id="chartMboTrend"></canvas>
         </div>
         <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo(20/10/25) 기준 · 30분 지연 리드타임은 지연콜 평균 소요시간으로 근사 계산
+          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo·Scarlett(20/10/25) 기준 · 30분 지연 리드타임은 지연콜 평균 소요시간으로 근사 계산
         </div>
       </div>
     </div>
@@ -1527,6 +1609,7 @@ function renderWeekly(data){
     return out;
   }
   const mboWeek = mboWeekStats(week);
+  const mboDetailWeek = Object.fromEntries(mboAgents.map(a => [a, mboDetailForAgentPeriod(sections, delay30, outcall, a, week.dates)]));
   const weekDateSet = new Set(week.dates);
   const hourlyStatsWeek = outcallHourlyStats(onboardCalls, d => weekDateSet.has(d.dateMD));
   const conversionAllW = onboardConversion(onboardCalls);
@@ -1711,8 +1794,8 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>MBO 공통 목표 달성 현황 (주간)</h2>
-      <table>
+      <h2>MBO 공통 목표 달성 현황 (주간) <span class="tag">클레임율 97%↑ · 지연율 3%↓ · 아웃콜 100%</span></h2>
+      <table style="margin-bottom:18px;">
         <thead><tr><th>상담원</th><th>주간 종합 가중점수</th><th>전주 대비</th></tr></thead>
         <tbody>
           ${mboAgents.map(a => {
@@ -1725,7 +1808,9 @@ function renderWeekly(data){
           }).join("")}
         </tbody>
       </table>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표의 일별 달성률을 주간 평균한 값입니다.</div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px;">상담원별 세부 내역 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· ${dateRangeLabel(week.monday, week.saturday)} 합산</span></div>
+      ${mboAgents.map(a => buildMboDetailCardHTML(a, mboDetailWeek[a], "주간")).join("")}
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표 기준입니다.</div>
     </div>
 
     <div class="footer-note">
@@ -1807,6 +1892,7 @@ function renderMonthly(data){
     return out;
   }
   const mboMonth = mboMonthStats(month.dates);
+  const mboDetailMonth = Object.fromEntries(mboAgents.map(a => [a, mboDetailForAgentPeriod(sections, delay30, outcall, a, month.dates)]));
   const mboMonthPrev = mboMonthStats(prevMonth?.dates);
 
   // 모바일 레터링 도입(8/11) 전후 아웃콜 성과 비교 - 전체 기간 기준
@@ -2046,8 +2132,8 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>MBO 공통 목표 달성 현황 (월간)</h2>
-      <table>
+      <h2>MBO 공통 목표 달성 현황 (월간) <span class="tag">클레임율 97%↑ · 지연율 3%↓ · 아웃콜 100%</span></h2>
+      <table style="margin-bottom:18px;">
         <thead><tr><th>상담원</th><th>월간 종합 가중점수</th><th>전월 대비</th></tr></thead>
         <tbody>
           ${mboAgents.map(a => {
@@ -2060,7 +2146,9 @@ function renderMonthly(data){
           }).join("")}
         </tbody>
       </table>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표의 일별 달성률을 월간 평균한 값입니다.</div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px;">상담원별 세부 내역 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· ${month.label} 합산</span></div>
+      ${mboAgents.map(a => buildMboDetailCardHTML(a, mboDetailMonth[a], "월간")).join("")}
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">데일리 클레임율(97%↑)·30분 지연율(3%↓)·온보딩 아웃콜(100%) 3개 목표 기준입니다.</div>
     </div>
 
     <div class="footer-note">
