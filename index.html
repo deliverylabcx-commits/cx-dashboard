@@ -137,15 +137,16 @@ function achieveClaimRate(rate){
   return 0.30;
 }
 // 30분 응대지연 달성률 - 지연율 3%이하 & 리드타임 20분이하 모두 달성 만점 / 1개만 75% / 지연율5%초과·리드타임25분초과 50% / 지연율8%초과 30%
-function achieveDelay(rate, leadMin){
+// 30분 응대지연 달성률 - 30분 초과 지연 비율 3% 이하 만점 / 5%초과 50% / 8%초과 30% (리드타임은 참고 지표로만 별도 표기, 달성률 계산에는 미반영 - 근거는 아래 참고)
+// * 원본 MBO 기준은 "건당 평균 처리 리드타임 30분→20분 단축"이지만, 확보된 데이터(30분 지연 체크 시트)는
+//   이미 30분을 초과한 건만 모아놓은 목록이라 평균이 항상 30분 이상으로 나와 이 조건을 원천적으로 충족할 수 없음.
+//   전체 상담 평균 처리시간 데이터가 없어 이 조건은 달성률 계산에서 제외하고 지연 비율만으로 판정함.
+function achieveDelay(rate){
   if (rate == null) return null;
-  const rateOk = rate <= 0.03;
-  const leadOk = leadMin != null ? leadMin <= 20 : null;
-  if (rateOk && leadOk) return 1.00;
-  if (rate > 0.08) return 0.30;
-  if (rate > 0.05 || leadOk === false) return 0.50;
-  if (rateOk || leadOk) return 0.75;
-  return 0.50;
+  if (rate <= 0.03) return 1.00;
+  if (rate <= 0.05) return 0.75;
+  if (rate <= 0.08) return 0.50;
+  return 0.30;
 }
 // 온보딩 아웃콜 완료(통화완료+서베이발송 포함 처리율) 달성률 - 100% 만점 / 90~99% 80% / 80~89% 60% / 80%미만 40%
 function achieveOutcall(rate){
@@ -175,7 +176,7 @@ function mboScoresForAgent(sections, delay30, outcall, agent, date){
 
   const w = MBO_WEIGHTS[agent];
   const aClaim = achieveClaimRate(claimRate);
-  const aDelay = achieveDelay(delayRate, leadMin);
+  const aDelay = achieveDelay(delayRate);
   const aOutcall = achieveOutcall(outcallRate);
   let weighted = null;
   if (w && aClaim!=null && aDelay!=null && aOutcall!=null){
@@ -216,7 +217,7 @@ function mboDetailForAgentPeriod(sections, delay30, outcall, agent, dateArr){
 
   const w = MBO_WEIGHTS[agent];
   const aClaim = achieveClaimRate(claimRate);
-  const aDelay = achieveDelay(delayRate, leadMin);
+  const aDelay = achieveDelay(delayRate);
   const aOutcall = achieveOutcall(outcallRate);
   let weighted = null;
   if (w && aClaim!=null && aDelay!=null && aOutcall!=null){
@@ -254,10 +255,11 @@ function buildMboDetailCardHTML(agent, d, periodLabel){
       </table>
 
       <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">30분 응대지연 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.delay!=null?w.delay:'-'})</span></div>
-      <table style="font-size:12.5px;margin-bottom:14px;">
-        <thead><tr><th>상담완료 대비</th><th>30분 지연건수</th><th>지연 비율</th><th>평균 리드타임</th><th>달성률</th></tr></thead>
+      <table style="font-size:12.5px;margin-bottom:6px;">
+        <thead><tr><th>상담완료 대비</th><th>30분 지연건수</th><th>지연 비율</th><th>지연건 평균 소요시간<span style="font-weight:400;">(참고)</span></th><th>달성률</th></tr></thead>
         <tbody><tr><td>${fmtNum(d.completed)}건</td><td>${fmtNum(d.delayCnt)}</td><td>${fmtPct(d.delayRate)}</td><td>${d.leadMin!=null?d.leadMin.toFixed(1)+'분':'-'}</td><td>${achieveBadge(d.aDelay)}</td></tr></tbody>
       </table>
+      <div style="font-size:10.5px;color:var(--ink-dim);margin-bottom:14px;">달성률은 지연 비율(3%↓)만으로 산정합니다. "평균 소요시간"은 30분을 이미 초과한 건들만의 평균이라 항상 30분 이상으로 나오는 게 정상이며, 참고용 수치입니다.</div>
 
       <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">온보딩 아웃콜 완료 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.outcall!=null?w.outcall:'-'})</span></div>
       <table style="font-size:12.5px;">
@@ -1400,7 +1402,7 @@ function render(data){
           <canvas id="chartMboTrend"></canvas>
         </div>
         <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo·Scarlett(20/10/25) 기준 · 30분 지연 리드타임은 지연콜 평균 소요시간으로 근사 계산
+          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo·Scarlett(20/10/25) 기준 · 30분 지연 달성률은 지연 비율(3%↓) 기준으로 산정 (평균 소요시간은 참고용)
         </div>
       </div>
     </div>
