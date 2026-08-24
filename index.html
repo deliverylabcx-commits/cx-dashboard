@@ -110,6 +110,7 @@ function scheduleStatusColor(st){
 }
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
 const OUTCALL_TARGET_RATE = 0.50; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
+const LEAD_TIME_CAP_MIN = 180; // 30분 지연건 평균 소요시간(참고) 계산 시, 이 값(3시간)을 넘는 값은 데이터 오류로 간주해 제외
 const LETTERING_START = "8/11"; // 모바일 레터링 서비스 운영 시작일 - 전후 비교 기준
 const UNPROCESSED_STATES = ["missed","opened","snoozed"]; // 미처리로 집계할 상태값 (closed=종료, initial=미배정 대기는 제외)
 
@@ -163,7 +164,7 @@ function mboScoresForAgent(sections, delay30, outcall, agent, date){
   const delayCnt = sections["30분 이상 지연"]?.[agent]?.[date] || 0;
   const delayRate = comp>0 ? delayCnt/comp : (delayCnt>0 ? 1 : 0);
   const agentDelayRows = (delay30||[]).filter(r => r.agent===agent && r.date===date);
-  const leadMins = agentDelayRows.map(r => durationToMinutes(r.duration)).filter(v=>v!=null);
+  const leadMins = agentDelayRows.map(r => durationToMinutes(r.duration)).filter(v=>v!=null && v<=LEAD_TIME_CAP_MIN);
   const leadMin = leadMins.length ? sum(leadMins)/leadMins.length : null;
 
   let outInbound=0, outCompleted=0, outSurveyed=0;
@@ -198,7 +199,7 @@ function mboDetailForAgentPeriod(sections, delay30, outcall, agent, dateArr){
   dateArr.forEach(d => {
     (delay30||[]).filter(r => r.agent===agent && r.date===d).forEach(r => {
       const m = durationToMinutes(r.duration);
-      if (m!=null) leadMins.push(m);
+      if (m!=null && m<=LEAD_TIME_CAP_MIN) leadMins.push(m);
     });
   });
   const leadMin = leadMins.length ? sum(leadMins)/leadMins.length : null;
@@ -259,7 +260,7 @@ function buildMboDetailCardHTML(agent, d, periodLabel){
         <thead><tr><th>상담완료 대비</th><th>30분 지연건수</th><th>지연 비율</th><th>지연건 평균 소요시간<span style="font-weight:400;">(참고)</span></th><th>달성률</th></tr></thead>
         <tbody><tr><td>${fmtNum(d.completed)}건</td><td>${fmtNum(d.delayCnt)}</td><td>${fmtPct(d.delayRate)}</td><td>${d.leadMin!=null?d.leadMin.toFixed(1)+'분':'-'}</td><td>${achieveBadge(d.aDelay)}</td></tr></tbody>
       </table>
-      <div style="font-size:10.5px;color:var(--ink-dim);margin-bottom:14px;">달성률은 지연 비율(3%↓)만으로 산정합니다. "평균 소요시간"은 30분을 이미 초과한 건들만의 평균이라 항상 30분 이상으로 나오는 게 정상이며, 참고용 수치입니다.</div>
+      <div style="font-size:10.5px;color:var(--ink-dim);margin-bottom:14px;">달성률은 지연 비율(3%↓)만으로 산정합니다. "평균 소요시간"은 30분을 이미 초과한 건들만의 평균이라 항상 30분 이상으로 나오는 게 정상이며, 참고용 수치입니다 (${LEAD_TIME_CAP_MIN}분 초과 건은 데이터 오류로 보고 평균 계산에서 제외).</div>
 
       <div style="font-size:12px;color:var(--ink-dim);margin-bottom:6px;font-weight:600;">온보딩 아웃콜 완료 <span style="color:var(--ink-dim);font-weight:400;">(가중치 ${w.outcall!=null?w.outcall:'-'})</span></div>
       <table style="font-size:12.5px;">
