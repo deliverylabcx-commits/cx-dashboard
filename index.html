@@ -113,6 +113,7 @@ const MBO_WEIGHTS = {
   maru:     { claim:20, delay:10, outcall:25 },
   Tsuna:    { claim:20, delay:10, outcall:25 },
   Hugo:     { claim:20, delay:10, outcall:25 },
+  Scarlett: { claim:20, delay:10, outcall:25 },
 };
 function durationToMinutes(hhmmss){
   if (!hhmmss) return null;
@@ -182,8 +183,8 @@ const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아�
 const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
-const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC" };
-const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol"]; // Zenze 8/1 퇴사로 제외
+const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC", Scarlett:"#E64980" };
+const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol","Scarlett"]; // Zenze 8/1 퇴사로 제외 / Scarlett 신규 입사
 
 let charts = {}; // keep instances to destroy on refresh
 let countdownTimer = null;
