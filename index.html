@@ -101,7 +101,13 @@ const CALL_SUCCESS_RESULTS = ["콜완료"]; // 통화 성공으로 집계할 Cal
 const CATEGORY_LABELS = { "5발주": "3~5발주" };
 function catLabel(c){ return CATEGORY_LABELS[c] || c; }
 const SCHEDULE_NAME_MAP = { Sense: "Zenze", Maru: "maru" }; // 스케줄 시트 표기 → CS_Tracking 표기로 정규화
-const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무"]; // 근무 아닌 상태로 취급
+const OFF_STATUSES = ["휴무","연차","오후 반차","오후 반반차","대체휴무","병가"]; // 근무 아닌 상태로 취급
+function scheduleStatusColor(st){
+  if (st == null) return "var(--ink-dim)";
+  if (st === "병가") return "var(--bad)"; // 병가는 다른 휴무와 구분되는 색으로 강조
+  if (OFF_STATUSES.includes(st)) return "var(--accent)";
+  return "var(--good)";
+}
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
 const OUTCALL_TARGET_RATE = 0.50; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
 const LETTERING_START = "8/11"; // 모바일 레터링 서비스 운영 시작일 - 전후 비교 기준
@@ -1371,8 +1377,7 @@ function render(data){
           <tbody>
             ${agents.map(a => `<tr><td>${a}</td>${weekDates.map(d=>{
               const st = schedule?.schedule?.[a]?.[d];
-              const isOff = st && OFF_STATUSES.includes(st);
-              const color = st==null ? 'var(--ink-dim)' : isOff ? 'var(--accent)' : 'var(--good)';
+              const color = scheduleStatusColor(st);
               return `<td style="color:${color}">${st || '-'}</td>`;
             }).join("")}</tr>`).join("")}
           </tbody>
@@ -2418,7 +2423,7 @@ function buildAgentDetailHTML(agent){
   const agentOverTarget = agentDelayRate!=null && agentDelayRate > 0.03;
 
   return `
-    ${workStatus ? `<div style="margin-bottom:12px;font-size:12.5px;color:var(--ink-dim);">오늘 근무 상태: <span style="color:${isOff?'var(--accent)':'var(--good)'};font-weight:600;">${workStatus}</span></div>` : ""}
+    ${workStatus ? `<div style="margin-bottom:12px;font-size:12.5px;color:var(--ink-dim);">오늘 근무 상태: <span style="color:${scheduleStatusColor(workStatus)};font-weight:600;">${workStatus}</span></div>` : ""}
     <div class="acc-kpis">
       <div class="acc-kpi"><div class="l">상담인입</div><div class="v">${fmtNum(inb)}</div></div>
       <div class="acc-kpi"><div class="l">상담완료</div><div class="v">${fmtNum(comp)}</div></div>
