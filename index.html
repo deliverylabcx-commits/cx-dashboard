@@ -287,6 +287,18 @@ const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC", Scarlett:"#E64980" };
 const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol","Scarlett"]; // Zenze 8/1 퇴사로 제외 / Scarlett 신규 입사
+const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze"]; // CS_Tracking에는 행이 없어 개별 추적은 안 하지만, 전체 인입 합계 보정에는 RAW 로그 기준으로 포함 (퇴사자)
+function departedInboundByDate(rawLog){
+  const m = new Map();
+  (rawLog||[]).forEach(r => {
+    if (r.direction !== "INBOUND" || !DEPARTED_INBOUND_AGENTS.includes(r.agent)) return;
+    m.set(r.date, (m.get(r.date)||0) + 1);
+  });
+  return m;
+}
+function departedInboundSum(depMap, dateArr){
+  return sum((dateArr||[]).map(d => depMap.get(d) || 0));
+}
 
 let charts = {}; // keep instances to destroy on refresh
 let countdownTimer = null;
@@ -983,8 +995,11 @@ function render(data){
 
   const inboundAgentsSum = clampNeg(sum(agents.map(a => sections["상담인입"][a][today])));
   const inboundYdayAgentsSum = sum(agents.map(a => sections["상담인입"][a][yday]));
-  const inboundToday = inboundAgentsSum; // 담당자(5명) 합산 기준 - Carol/송송/미배정 등은 제외
-  const inboundYday = inboundYdayAgentsSum;
+  const depMap = departedInboundByDate(rawLog);
+  const depToday = departedInboundSum(depMap, [today]);
+  const depYday = departedInboundSum(depMap, [yday]);
+  const inboundToday = inboundAgentsSum + depToday; // 담당자 합산 + 퇴사자(Carol/Zenze) RAW 기준 보정
+  const inboundYday = inboundYdayAgentsSum + depYday;
   const completeToday = clampNeg(sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])));
   const completeRateToday = clampPct(sections["상담완료율_%"]?.["Total"]?.[today]);
   const delayToday = clampNeg(sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])));
@@ -996,7 +1011,7 @@ function render(data){
   // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
   const wowIdx = todayIdx - 7;
   const wowDate = dates[wowIdx];
-  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
+  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) + departedInboundSum(depMap, [wowDate]) : null;
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
   // 통화완료율 WoW
@@ -1258,7 +1273,8 @@ function render(data){
 
     <div class="kpis">
       <div class="kpi"><div class="label">${dateLabel(today)} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
-        <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
+        <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+        ${depToday>0 ? `<div class="delta" style="font-size:10.5px;">Carol·Zenze(퇴사) RAW 보정 +${fmtNum(depToday)}건 포함</div>` : ''}</div>
       <div class="kpi"><div class="label">CS처리율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">30분 이상 지연 (Total)</div><div class="val">${fmtNum(delayToday)}</div>
@@ -1492,7 +1508,8 @@ function render(data){
   }
   const productivityScores = agents.map(productivityScoreOf);
 
-  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend });
+  const recentTotalsWithDep = recentDates.map(d => sum(agents.map(a => sections["상담인입"][a][d]||0)) + departedInboundSum(depMap, [d]));
+  drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend, recentTotalsWithDep });
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, targetCompletedToday, DELAY_PENALTY, rawLog };
@@ -1533,9 +1550,10 @@ function renderWeekly(data){
     return `WoW 비교: 전주 ${prevTxt} → 이번 주 ${curTxt} (<span style="color:${color};">${arrow} ${diffTxt}</span>)`;
   }
 
+  const depMapW = departedInboundByDate(rawLog);
   function cxStats(w){
     if (!w) return null;
-    const inbound = sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))));
+    const inbound = sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapW, w.dates);
     const completed = sum(w.dates.map(d => sum(agents.map(a => sections["상담완료"]?.[a]?.[d] || 0))));
     return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
   }
@@ -1824,7 +1842,7 @@ function renderWeekly(data){
   destroyCharts();
   const weekDailyCanvas = document.getElementById("chartWeekDaily");
   if (weekDailyCanvas){
-    const perDay = week.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)));
+    const perDay = week.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)) + departedInboundSum(depMapW, [d]));
     charts.weekDaily = new Chart(weekDailyCanvas, {
       type: "bar",
       data: {
@@ -1838,7 +1856,7 @@ function renderWeekly(data){
 
 /* ===================== 월별 리포트 ===================== */
 function renderMonthly(data){
-  const { dates, sections, outcall, delay30, onboardCalls } = data;
+  const { dates, sections, outcall, delay30, onboardCalls, rawLog } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const months = buildMonthList(dates);
   const app = document.getElementById("app");
@@ -1862,9 +1880,10 @@ function renderMonthly(data){
     return `전월 대비: ${prevTxt} → ${curTxt} (<span style="color:${color};">${arrow} ${diffTxt}</span>)`;
   }
 
+  const depMapM = departedInboundByDate(rawLog);
   function cxStats(dSet){
     if (!dSet || !dSet.length) return null;
-    const inbound = sum(dSet.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))));
+    const inbound = sum(dSet.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapM, dSet);
     const completed = sum(dSet.map(d => sum(agents.map(a => sections["상담완료"]?.[a]?.[d] || 0))));
     return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
   }
@@ -1943,7 +1962,7 @@ function renderMonthly(data){
   const weeksInMonth = buildWeekList(month.dates);
   const weekBreakdown = weeksInMonth.map(w => ({
     label: dateRangeLabel(w.monday, w.saturday),
-    inbound: sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0))))
+    inbound: sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapM, w.dates)
   }));
 
   const monthlyInsights = [];
@@ -2162,7 +2181,7 @@ function renderMonthly(data){
   destroyCharts();
   const monthDailyCanvas = document.getElementById("chartMonthDaily");
   if (monthDailyCanvas){
-    const perDay = month.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)));
+    const perDay = month.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)) + departedInboundSum(depMapM, [d]));
     const tickColor = (ctx) => { const d = month.dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
     charts.monthDaily = new Chart(monthDailyCanvas, {
       type: "bar",
@@ -2175,13 +2194,13 @@ function renderMonthly(data){
   }
 }
 
-function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend }){
+function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend, recentTotalsWithDep }){
   destroyCharts();
   Chart.defaults.color = "#8B96AD";
   Chart.defaults.borderColor = "#28324D";
   Chart.defaults.font.family = "Pretendard, sans-serif";
 
-  const totals = dates.map(d => sum(agents.map(a => sections["상담인입"][a][d])));
+  const totals = recentTotalsWithDep || dates.map(d => sum(agents.map(a => sections["상담인입"][a][d])));
   const peakIdx = totals.indexOf(Math.max(...totals));
   const dateTickColor = (ctx) => { const d = dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
   const dateLabels = dates.map(d => dateLabel(d));
