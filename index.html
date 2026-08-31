@@ -287,17 +287,46 @@ const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC", Scarlett:"#E64980" };
 const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol","Scarlett"]; // Zenze 8/1 퇴사로 제외 / Scarlett 신규 입사
-const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze"]; // CS_Tracking에는 행이 없어 개별 추적은 안 하지만, 전체 인입 합계 보정에는 RAW 로그 기준으로 포함 (퇴사자)
-function departedInboundByDate(rawLog){
+const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze"]; // 퇴사자 - 개별 카드/MBO에는 노출하지 않되 전체 인입 합계에는 포함
+// 시트(CS_Tracking)에 행이 없는 퇴사자만 RAW 로그로 보정한다. 시트에 이미 집계된 인원(예: Zenze)은 Total 행에 포함돼 있어 중복 가산 금지.
+function departedInboundByDate(rawLog, sections){
   const m = new Map();
   (rawLog||[]).forEach(r => {
-    if (r.direction !== "INBOUND" || !DEPARTED_INBOUND_AGENTS.includes(r.agent)) return;
+    if (r.direction !== "INBOUND") return;
+    if (!DEPARTED_INBOUND_AGENTS.includes(r.agent)) return;
+    if (sections?.["상담인입"]?.[r.agent]) return; // 시트에 이미 있으면 스킵
+    m.set(r.date, (m.get(r.date)||0) + 1);
+  });
+  return m;
+}
+function departedCompletedByDate(rawLog, sections){
+  const m = new Map();
+  (rawLog||[]).forEach(r => {
+    if (r.direction !== "INBOUND") return;
+    if (!DEPARTED_INBOUND_AGENTS.includes(r.agent)) return;
+    if (sections?.["상담인입"]?.[r.agent]) return;
+    if (!r.state || r.state.toLowerCase() !== "closed") return;
     m.set(r.date, (m.get(r.date)||0) + 1);
   });
   return m;
 }
 function departedInboundSum(depMap, dateArr){
   return sum((dateArr||[]).map(d => depMap.get(d) || 0));
+}
+// 전체 인입 = 시트 Total 행(퇴사자 Zenze 포함 전원 합계) + 시트에 없는 퇴사자(Carol) RAW 보정
+function totalInboundOn(date, totalRow, sections, agents, depMap){
+  const sheetTotal = totalRow?.[date];
+  const base = (sheetTotal != null && sheetTotal >= 0)
+    ? sheetTotal
+    : sum(agents.map(a => sections?.["상담인입"]?.[a]?.[date] || 0));
+  return base + (depMap.get(date) || 0);
+}
+function totalCompletedOn(date, sections, agents, depCompMap){
+  const sheetTotal = sections?.["상담완료"]?.["Total"]?.[date];
+  const base = (sheetTotal != null && sheetTotal >= 0)
+    ? sheetTotal
+    : sum(agents.map(a => sections?.["상담완료"]?.[a]?.[date] || 0));
+  return base + (depCompMap.get(date) || 0);
 }
 
 let charts = {}; // keep instances to destroy on refresh
@@ -995,13 +1024,13 @@ function render(data){
 
   const inboundAgentsSum = clampNeg(sum(agents.map(a => sections["상담인입"][a][today])));
   const inboundYdayAgentsSum = sum(agents.map(a => sections["상담인입"][a][yday]));
-  const depMap = departedInboundByDate(rawLog);
-  const depToday = departedInboundSum(depMap, [today]);
-  const depYday = departedInboundSum(depMap, [yday]);
-  const inboundToday = inboundAgentsSum + depToday; // 담당자 합산 + 퇴사자(Carol/Zenze) RAW 기준 보정
-  const inboundYday = inboundYdayAgentsSum + depYday;
-  const completeToday = clampNeg(sum(agents.map(a=>sections["상담완료"]?.[a]?.[today])));
-  const completeRateToday = clampPct(sections["상담완료율_%"]?.["Total"]?.[today]);
+  const depMap = departedInboundByDate(rawLog, sections);
+  const depCompMap = departedCompletedByDate(rawLog, sections);
+  const depToday = depMap.get(today) || 0;
+  const inboundToday = totalInboundOn(today, totalRow, sections, agents, depMap);
+  const inboundYday = totalInboundOn(yday, totalRow, sections, agents, depMap);
+  const completeToday = totalCompletedOn(today, sections, agents, depCompMap);
+  const completeRateToday = inboundToday>0 ? Math.min(1, completeToday/inboundToday) : null;
   const delayToday = clampNeg(sum(agents.map(a=>sections["30분 이상 지연"]?.[a]?.[today])));
   const DELAY_TARGET_RATE = 0.03; // 완료건 대비 3% 목표
   const delayRateToday = (completeToday!=null && completeToday>0) ? delayToday/completeToday : null;
@@ -1011,7 +1040,7 @@ function render(data){
   // WoW: 오늘 vs 7일 전 같은 요일 (전체 인입 합계 기준)
   const wowIdx = todayIdx - 7;
   const wowDate = dates[wowIdx];
-  const inboundWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) + departedInboundSum(depMap, [wowDate]) : null;
+  const inboundWow = wowDate!=null ? totalInboundOn(wowDate, totalRow, sections, agents, depMap) : null;
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
   // 통화완료율 WoW
@@ -1508,7 +1537,7 @@ function render(data){
   }
   const productivityScores = agents.map(productivityScoreOf);
 
-  const recentTotalsWithDep = recentDates.map(d => sum(agents.map(a => sections["상담인입"][a][d]||0)) + departedInboundSum(depMap, [d]));
+  const recentTotalsWithDep = recentDates.map(d => totalInboundOn(d, totalRow, sections, agents, depMap));
   drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend, recentTotalsWithDep });
   startCountdown();
 
@@ -1550,11 +1579,12 @@ function renderWeekly(data){
     return `WoW 비교: 전주 ${prevTxt} → 이번 주 ${curTxt} (<span style="color:${color};">${arrow} ${diffTxt}</span>)`;
   }
 
-  const depMapW = departedInboundByDate(rawLog);
+  const depMapW = departedInboundByDate(rawLog, sections);
+  const depCompMapW = departedCompletedByDate(rawLog, sections);
   function cxStats(w){
     if (!w) return null;
-    const inbound = sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapW, w.dates);
-    const completed = sum(w.dates.map(d => sum(agents.map(a => sections["상담완료"]?.[a]?.[d] || 0))));
+    const inbound = sum(w.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapW)));
+    const completed = sum(w.dates.map(d => totalCompletedOn(d, sections, agents, depCompMapW)));
     return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
   }
   const cx = cxStats(week);
@@ -1842,7 +1872,7 @@ function renderWeekly(data){
   destroyCharts();
   const weekDailyCanvas = document.getElementById("chartWeekDaily");
   if (weekDailyCanvas){
-    const perDay = week.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)) + departedInboundSum(depMapW, [d]));
+    const perDay = week.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapW));
     charts.weekDaily = new Chart(weekDailyCanvas, {
       type: "bar",
       data: {
@@ -1880,11 +1910,12 @@ function renderMonthly(data){
     return `전월 대비: ${prevTxt} → ${curTxt} (<span style="color:${color};">${arrow} ${diffTxt}</span>)`;
   }
 
-  const depMapM = departedInboundByDate(rawLog);
+  const depMapM = departedInboundByDate(rawLog, sections);
+  const depCompMapM = departedCompletedByDate(rawLog, sections);
   function cxStats(dSet){
     if (!dSet || !dSet.length) return null;
-    const inbound = sum(dSet.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapM, dSet);
-    const completed = sum(dSet.map(d => sum(agents.map(a => sections["상담완료"]?.[a]?.[d] || 0))));
+    const inbound = sum(dSet.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapM)));
+    const completed = sum(dSet.map(d => totalCompletedOn(d, sections, agents, depCompMapM)));
     return { inbound, completed, rate: inbound>0 ? completed/inbound : null };
   }
   const cx = cxStats(month.dates);
@@ -1962,7 +1993,7 @@ function renderMonthly(data){
   const weeksInMonth = buildWeekList(month.dates);
   const weekBreakdown = weeksInMonth.map(w => ({
     label: dateRangeLabel(w.monday, w.saturday),
-    inbound: sum(w.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)))) + departedInboundSum(depMapM, w.dates)
+    inbound: sum(w.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapM)))
   }));
 
   const monthlyInsights = [];
@@ -2181,12 +2212,12 @@ function renderMonthly(data){
   destroyCharts();
   const monthDailyCanvas = document.getElementById("chartMonthDaily");
   if (monthDailyCanvas){
-    const perDay = month.dates.map(d => sum(agents.map(a => sections["상담인입"][a][d] || 0)) + departedInboundSum(depMapM, [d]));
+    const perDay = month.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapM));
     const tickColor = (ctx) => { const d = month.dates[ctx.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; };
     charts.monthDaily = new Chart(monthDailyCanvas, {
       type: "bar",
       data: {
-        labels: month.dates.map(d => d),
+        labels: month.dates.map(d => dateWithDay(d)),
         datasets: [{ data: perDay, backgroundColor: "#4C6EF588", borderRadius: 3 }]
       },
       options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}, ticks:{color:tickColor, maxRotation:90, minRotation:90}} } }
