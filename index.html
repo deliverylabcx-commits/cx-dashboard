@@ -284,7 +284,7 @@ const STATE_LABELS = { closed:"종료", missed:"미처리 상담", initial:"인�
 const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아웃콜/지연 시트)
 const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
-const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈"];
+const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈","부재율"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC", Scarlett:"#E64980" };
 const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol","Scarlett"]; // Zenze 8/1 퇴사로 제외 / Scarlett 신규 입사
 const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze"]; // 퇴사자 - 개별 카드/MBO에는 노출하지 않되 전체 인입 합계에는 포함
@@ -355,7 +355,7 @@ function parseCSV(text){
   const sections = {};
   let totalRow = null;
   let currentSection = null;
-  const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8 }; // 이 섹션은 정확히 8개 카테고리로 끝남 - 이후 행(예: WOW 델타 등)이 같은 라벨을 재사용해도 오염되지 않도록 위치 기반으로 차단
+  const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8, "부재율": 2 }; // 이 섹션들은 정확히 정해진 줄 수로 끝남 - 이후 행(예: WOW 델타 등)이 같은 라벨을 재사용해도 오염되지 않도록 위치 기반으로 차단
   let sectionRowCount = 0;
 
   for (let r = HEADER_ROW + 1; r < rows.length; r++){
@@ -1050,6 +1050,15 @@ function render(data){
   // 평균 담당자별 인입량 (개별 상담원 배정 건 기준 / 오늘 / 전주 동요일)
   const inboundAgentsWow = wowDate!=null ? sum(agents.map(a=>sections["상담인입"][a][wowDate])) : null;
   const avgPerAgentToday = agents.length ? inboundAgentsSum / agents.length : null;
+
+  // 부재율 (CS_Tracking 부재율 섹션 - 목표 미설정, 참고 지표)
+  const absentSection = sections["부재율"] || {};
+  const absentToday = clampNeg(absentSection["부재건수"]?.[today]);
+  const absentRateToday = clampPct(absentSection["부재_%"]?.[today]);
+  const absentWow = wowDate!=null ? clampNeg(absentSection["부재건수"]?.[wowDate]) : null;
+  const absentRateWow = wowDate!=null ? clampPct(absentSection["부재_%"]?.[wowDate]) : null;
+  const absentDelta = (absentToday!=null && absentWow!=null && absentWow>0) ? (absentToday-absentWow)/absentWow : null;
+  const absentRateDelta = (absentRateToday!=null && absentRateWow!=null) ? absentRateToday-absentRateWow : null;
   const avgPerAgentWow = (inboundAgentsWow!=null && agents.length) ? inboundAgentsWow / agents.length : null;
   const avgPerAgentDelta = (avgPerAgentWow!=null && avgPerAgentWow>0) ? ((avgPerAgentToday-avgPerAgentWow)/avgPerAgentWow) : null;
 
@@ -1206,6 +1215,10 @@ function render(data){
         ? `오늘 지연율은 완료건 대비 <b>${fmtPct(delayRateToday)}</b>로 목표(3%)를 초과했습니다.`
         : `오늘 지연율은 완료건 대비 <b>${fmtPct(delayRateToday)}</b>로 목표(3%) 이내입니다.`);
     }
+    if (absentRateToday != null){
+      const trendTxt = absentRateDelta==null ? '' : (absentRateDelta<=0 ? ` (전주 대비 ▼ ${Math.abs(Math.round(absentRateDelta*100))}%p 개선)` : ` (전주 대비 ▲ ${Math.abs(Math.round(absentRateDelta*100))}%p 증가)`);
+      insights.push(`오늘 부재율은 <b>${fmtPct(absentRateToday)}</b>입니다${trendTxt}.`);
+    }
     if (outcall && outcall.categories?.length){
       const catRates = outcall.categories.map(c => {
         const t = outcall.data[c]?.["Total"];
@@ -1317,6 +1330,9 @@ function render(data){
         <div class="delta ${avgPerAgentDelta==null?'':(avgPerAgentDelta>=0?'up':'down')}">${avgPerAgentDelta!=null ? (avgPerAgentDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(avgPerAgentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
       <div class="kpi"><div class="label">오늘 근무 인원</div><div class="val">${totalStaffToday!=null ? totalStaffToday : '-'}${minStaffToday!=null?`<span style="font-size:14px;color:var(--ink-dim);"> / 최소 ${minStaffToday}</span>`:''}</div>
         <div class="delta">${issueToday || '스케줄 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">부재건수 (Total)</div><div class="val">${fmtNum(absentToday)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtPct(absentRateToday)}</span></div>
+        <div class="delta ${absentDelta==null?'':(absentDelta<=0?'up':'down')}">${absentDelta!=null ? (absentDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+        <div class="delta" style="font-size:10.5px;">부재율 ${absentRateDelta!=null ? (absentRateDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentRateDelta*100))+'%p' : '-'} · 목표 미설정(참고)</div></div>
     </div>
 
     <div class="grid2">
@@ -1568,11 +1584,12 @@ function renderWeekly(data){
   const week = weeks[wIdx];
   const prevWeek = wIdx > 0 ? weeks[wIdx-1] : null;
 
-  function wowText(cur, prev, unit, pctPoint){
+  function wowText(cur, prev, unit, pctPoint, invert){
     if (cur==null || prev==null) return '<span style="color:var(--ink-dim);">전주 데이터 없음</span>';
     const diff = cur - prev;
     const arrow = diff>=0 ? '▲' : '▼';
-    const color = diff>=0 ? 'var(--good)' : 'var(--bad)';
+    const isGood = invert ? diff<=0 : diff>=0;
+    const color = isGood ? 'var(--good)' : 'var(--bad)';
     const diffTxt = pctPoint ? `${Math.abs(Math.round(diff*100))}%p` : `${fmtNum(Math.abs(diff))}${unit||'건'}`;
     const curTxt = pctPoint ? fmtPct(cur) : fmtNum(cur);
     const prevTxt = pctPoint ? fmtPct(prev) : fmtNum(prev);
@@ -1625,6 +1642,17 @@ function renderWeekly(data){
   const issueWeek = issueWeekStats(week).sort((a,b)=>b.total-a.total);
   const issueWeekPrevMap = Object.fromEntries(issueWeekStats(prevWeek).map(x=>[x.category,x.total]));
 
+  // 부재율 주간 집계 (CS_Tracking 부재율 섹션 - 목표 미설정, 참고 지표)
+  const absentSectionW = sections["부재율"] || {};
+  function absentWeekStats(w){
+    if (!w) return { total: 0, rate: null };
+    const total = sum(w.dates.map(d => absentSectionW["부재건수"]?.[d] || 0));
+    const inbound = sum(w.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapW)));
+    return { total, rate: inbound>0 ? total/inbound : null };
+  }
+  const absentWeek = absentWeekStats(week);
+  const absentWeekPrev = absentWeekStats(prevWeek);
+
   // 담당자별 생산성 주간 지표
   function agentWeekProductivity(w){
     if (!w) return {};
@@ -1673,6 +1701,11 @@ function renderWeekly(data){
   }
   if (cx && cx.rate!=null){
     weeklyInsights.push(`이번 주 응대율은 ${fmtPct(cx.rate)}입니다.`);
+  }
+  if (absentWeek.rate != null){
+    const diff = (absentWeekPrev.rate!=null) ? absentWeek.rate - absentWeekPrev.rate : null;
+    const trendTxt = diff==null ? '' : (diff<=0 ? ` (전주 대비 ▼ ${Math.abs(Math.round(diff*100))}%p 개선)` : ` (전주 대비 ▲ ${Math.abs(Math.round(diff*100))}%p 증가)`);
+    weeklyInsights.push(`이번 주 부재율은 <b>${fmtPct(absentWeek.rate)}</b>입니다${trendTxt}.`);
   }
   if (delayWeek.byReason.length){
     const top = delayWeek.byReason[0];
@@ -1791,6 +1824,16 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+      <h2>부재 현황 (주간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
+      <div class="kpis">
+        <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentWeek.total)}</div>
+          <div class="delta">${wowText(absentWeek.total, absentWeekPrev.total, null, false, true)}</div></div>
+        <div class="kpi"><div class="label">부재율</div><div class="val">${fmtPct(absentWeek.rate)}</div>
+          <div class="delta">${wowText(absentWeek.rate, absentWeekPrev.rate, null, true, true)}</div></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>30분 응대지연 현황</h2>
       <div class="kpis" style="margin-bottom:16px;">
         <div class="kpi"><div class="label">총 지연 건수</div><div class="val">${fmtNum(delayWeek.total)}</div>
@@ -1899,11 +1942,12 @@ function renderMonthly(data){
   const month = months[mIdx];
   const prevMonth = mIdx > 0 ? months[mIdx-1] : null;
 
-  function wowText(cur, prev, unit, pctPoint){
+  function wowText(cur, prev, unit, pctPoint, invert){
     if (cur==null || prev==null) return '<span style="color:var(--ink-dim);">전월 데이터 없음</span>';
     const diff = cur - prev;
     const arrow = diff>=0 ? '▲' : '▼';
-    const color = diff>=0 ? 'var(--good)' : 'var(--bad)';
+    const isGood = invert ? diff<=0 : diff>=0;
+    const color = isGood ? 'var(--good)' : 'var(--bad)';
     const diffTxt = pctPoint ? `${Math.abs(Math.round(diff*100))}%p` : `${fmtNum(Math.abs(diff))}${unit||'건'}`;
     const curTxt = pctPoint ? fmtPct(cur) : fmtNum(cur);
     const prevTxt = pctPoint ? fmtPct(prev) : fmtNum(prev);
@@ -1989,6 +2033,17 @@ function renderMonthly(data){
   const issueMonth = issueStats(month.dates).sort((a,b)=>b.total-a.total);
   const issueMonthPrevMap = Object.fromEntries(issueStats(prevMonth?.dates).map(x=>[x.category,x.total]));
 
+  // 부재율 월간 집계 (CS_Tracking 부재율 섹션 - 목표 미설정, 참고 지표)
+  const absentSectionM = sections["부재율"] || {};
+  function absentMonthStats(dSet){
+    if (!dSet) return { total: 0, rate: null };
+    const total = sum(dSet.map(d => absentSectionM["부재건수"]?.[d] || 0));
+    const inbound = sum(dSet.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapM)));
+    return { total, rate: inbound>0 ? total/inbound : null };
+  }
+  const absentMonth = absentMonthStats(month.dates);
+  const absentMonthPrev = absentMonthStats(prevMonth?.dates);
+
   // 이번 달 내 주차별 breakdown (월별 vs 주차별 비교용)
   const weeksInMonth = buildWeekList(month.dates);
   const weekBreakdown = weeksInMonth.map(w => ({
@@ -2002,6 +2057,11 @@ function renderMonthly(data){
     monthlyInsights.push(`전월(${prevMonth.label}) 인입 ${fmtNum(cxPrev.inbound)}건 → 이번 달(${month.label}) ${fmtNum(cx.inbound)}건 (${diff>=0?'▲':'▼'} ${fmtNum(Math.abs(diff))}건)`);
   }
   if (cx && cx.rate!=null) monthlyInsights.push(`${month.label} 응대율은 ${fmtPct(cx.rate)}입니다.`);
+  if (absentMonth.rate != null){
+    const diff = (absentMonthPrev.rate!=null) ? absentMonth.rate - absentMonthPrev.rate : null;
+    const trendTxt = diff==null ? '' : (diff<=0 ? ` (전월 대비 ▼ ${Math.abs(Math.round(diff*100))}%p 개선)` : ` (전월 대비 ▲ ${Math.abs(Math.round(diff*100))}%p 증가)`);
+    monthlyInsights.push(`${month.label} 부재율은 <b>${fmtPct(absentMonth.rate)}</b>입니다${trendTxt}.`);
+  }
   if (weekBreakdown.length){
     const peak = weekBreakdown.reduce((a,b)=>b.inbound>a.inbound?b:a);
     monthlyInsights.push(`${month.label} 중 인입이 가장 많았던 주는 <b>${peak.label}</b> (${fmtNum(peak.inbound)}건)입니다.`);
@@ -2167,6 +2227,16 @@ function renderMonthly(data){
       <div class="kpis">
         ${issueMonth.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
           <div class="delta" style="font-size:11px;">${wowText(x.total, issueMonthPrevMap[x.category])}</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>부재 현황 (월간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
+      <div class="kpis">
+        <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentMonth.total)}</div>
+          <div class="delta">${wowText(absentMonth.total, absentMonthPrev.total, null, false, true)}</div></div>
+        <div class="kpi"><div class="label">부재율</div><div class="val">${fmtPct(absentMonth.rate)}</div>
+          <div class="delta">${wowText(absentMonth.rate, absentMonthPrev.rate, null, true, true)}</div></div>
       </div>
     </div>
 
