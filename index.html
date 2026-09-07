@@ -892,6 +892,7 @@ const WEEKDAY_KO = ["일","월","화","수","목","금","토"];
 function dateWithDay(md){ return md ? `${md} ${WEEKDAY_KO[weekdayOf(md)]}` : "-"; }
 function dateRangeLabel(a, b){ return `${dateWithDay(a)} ~ ${dateWithDay(b)}`; }
 function weekdayOf(md){
+  if (!md || typeof md !== "string") return 1; // 방어: 잘못된 값이면 평일(월)로 취급해 크래시 방지
   const [m,d] = md.split("/").map(Number);
   return new Date(DATA_YEAR, m-1, d).getDay(); // 0=일 ... 6=토
 }
@@ -907,10 +908,12 @@ function dateLabel(md, opts){
   return text;
 }
 function mdToISO(md){
+  if (!md) return `${DATA_YEAR}-01-01`;
   const [m,d] = md.split("/").map(Number);
   return `${DATA_YEAR}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 }
 function addDaysMD(md, n){
+  if (!md) return "1/1";
   const [m,d] = md.split("/").map(Number);
   const dt = new Date(DATA_YEAR, m-1, d);
   dt.setDate(dt.getDate()+n);
@@ -1099,6 +1102,7 @@ function render(data){
 
   // 아웃콜 주별 트래킹 (월요일 시작 기준 주 단위, 카테고리별 집계)
   function weekKeyOf(md){
+    if (!md || typeof md !== "string") return "1/1";
     const [m,d] = md.split("/").map(Number);
     const dt = new Date(DATA_YEAR, m-1, d);
     const day = dt.getDay();
@@ -1993,7 +1997,7 @@ function renderMonthly(data){
   const mboMonthPrev = mboMonthStats(prevMonth?.dates);
 
   // 모바일 레터링 도입(8/11) 전후 아웃콜 성과 비교 - 전체 기간 기준
-  function mdKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; }
+  function mdKey(md){ if (!md) return 0; const [m,d] = md.split("/").map(Number); return m*100+d; }
   const letteringKey = mdKey(LETTERING_START);
   const beforeDates = dates.filter(d => mdKey(d) < letteringKey);
   const afterDates = dates.filter(d => mdKey(d) >= letteringKey);
@@ -2608,7 +2612,7 @@ function buildAgentDetailHTML(agent){
   const scoreTotal = isOff ? null : (scoreVolume*0.6 + scoreSpeed*0.4);
   const castRefScore = (cast!=null) ? Math.min(100, (cast / 5.0) * 100) : null; // 참고용, 종합점수에는 미반영
 
-  function mdSortKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; }
+  function mdSortKey(md){ if (!md) return 0; const [m,d] = md.split("/").map(Number); return m*100+d; }
   const delay30Rows = delay30.filter(r => r.agent === agent && r.date === today).sort((a,b) => mdSortKey(b.date) - mdSortKey(a.date));
   const delayHoldRows = delayHold.filter(r => r.agent === agent && r.date === today).sort((a,b) => mdSortKey(b.date) - mdSortKey(a.date));
 
