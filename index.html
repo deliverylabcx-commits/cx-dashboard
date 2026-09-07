@@ -344,7 +344,10 @@ let selectedMonthKey = null; // 월간 리포트에서 선택된 월
 function parseCSV(text){
   const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
   const rows = parsed.data;
-  const header = rows[HEADER_ROW] || [];
+  // 고정 행 번호 대신 "담당자/ETC" 텍스트가 있는 행을 찾는다 (시트에 행이 추가/삭제돼도 안전)
+  let headerRowIdx = rows.findIndex(r => (r||[]).some(c => (c||"").trim() === "담당자/ETC"));
+  if (headerRowIdx < 0) headerRowIdx = HEADER_ROW; // 못 찾으면 기존 고정값으로 폴백
+  const header = rows[headerRowIdx] || [];
   const dateRe = /^\d{1,2}\/\d{1,2}$/;
   const dateCols = [];
   header.forEach((cell, idx) => {
@@ -358,7 +361,7 @@ function parseCSV(text){
   const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8, "부재율": 2 }; // 이 섹션들은 정확히 정해진 줄 수로 끝남 - 이후 행(예: WOW 델타 등)이 같은 라벨을 재사용해도 오염되지 않도록 위치 기반으로 차단
   let sectionRowCount = 0;
 
-  for (let r = HEADER_ROW + 1; r < rows.length; r++){
+  for (let r = headerRowIdx + 1; r < rows.length; r++){
     const row = rows[r];
     if (!row || row.length < 3) continue;
     const col1 = (row[1] || "").trim();
