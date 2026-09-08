@@ -355,10 +355,22 @@ function parseCSV(text){
     if (dateRe.test(v)) dateCols.push({ col: idx, date: v });
   });
 
+  // 섹션별로 "이 섹션에 속할 수 있는 행 라벨"을 명시적으로 검증한다.
+  // (예전에는 B열에 메모가 들어가면 섹션 인식이 끊겨 상담원 일부가 통째로 누락되는 문제가 있었음)
+  const AGENT_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)"];
+  const AGENT_LIKE = /^[A-Za-z][A-Za-z0-9_. -]*$/; // 상담원 닉네임은 영문 - 신규 입사자도 자동 인식
+  function rowBelongsTo(section, label){
+    if (!label) return false;
+    if (AGENT_SECTIONS.includes(section)) return AGENT_LIKE.test(label) || label === "Total" || label === "AVG";
+    if (section === "부재율") return label === "부재건수" || label === "부재_%";
+    if (section === "카테고리별 이슈") return true; // 카테고리명은 자유 - 행 수 제한으로 보호
+    return true;
+  }
+
   const sections = {};
   let totalRow = null;
   let currentSection = null;
-  const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8, "부재율": 2 }; // 이 섹션들은 정확히 정해진 줄 수로 끝남 - 이후 행(예: WOW 델타 등)이 같은 라벨을 재사용해도 오염되지 않도록 위치 기반으로 차단
+  const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8, "부재율": 2 }; // 정해진 줄 수를 넘으면 이후 동일 라벨 재사용(WOW 델타 등)으로 간주해 차단
   let sectionRowCount = 0;
 
   for (let r = headerRowIdx + 1; r < rows.length; r++){
@@ -372,18 +384,16 @@ function parseCSV(text){
       dateCols.forEach(({col,date}) => { totalRow[date] = toNum(row[col]); });
       continue;
     }
-    if (/wow/i.test(col1)) break; // WOW_Tarcking 부속 섹션은 상담인입/30분 이상 지연/카테고리별 이슈 라벨을 재사용해 델타값을 적어두므로, 여기부터는 파싱을 완전히 중단해 실제 데이터가 델타값으로 덮어써지는 것을 막는다
-    if (col1){
-      if (KNOWN_SECTIONS.includes(col1)){ currentSection = col1; sectionRowCount = 0; }
-      else if (col1 !== "완료건 대비 3%") currentSection = null; // 알려진 주석 행은 무시, 그 외 미확인 라벨은 새 섹션 시작으로 간주
-    }
+    // WOW_Tarcking 이후 구간은 동일 섹션명을 재사용해 델타값을 적어두므로 파싱을 완전히 중단
+    if (/wow/i.test(col1) || /wow/i.test(col2)) break;
+
+    // 알려진 섹션명을 만나면 섹션 전환. 그 외 B열 텍스트(메모 등)는 무시하고 현재 섹션을 유지한다.
+    if (col1 && KNOWN_SECTIONS.includes(col1)){ currentSection = col1; sectionRowCount = 0; }
     if (!currentSection || !col2) continue;
 
     const limit = SECTION_ROW_LIMITS[currentSection];
-    if (limit != null && sectionRowCount >= limit){
-      currentSection = null; // 정해진 행 수를 넘어서면 이후 같은 라벨의 다른 섹션(WOW 델타 등)으로 간주해 더 이상 수집하지 않음
-      continue;
-    }
+    if (limit != null && sectionRowCount >= limit) continue;
+    if (!rowBelongsTo(currentSection, col2)) continue; // 섹션에 어울리지 않는 행은 조용히 건너뜀
 
     sections[currentSection] = sections[currentSection] || {};
     sections[currentSection][col2] = {};
@@ -1251,6 +1261,9 @@ function render(data){
     if (delayEntries.length){
       const worst = delayEntries.reduce((a,b) => b[1]>a[1] ? b : a);
       insights.push(`오늘 30분 이상 지연이 가장 많은 상담원은 <b>${worst[0]}</b> (${worst[1]}건)입니다.`);
+    } else if (delayToday > 0){
+      // CS_Tracking 집계에는 지연이 있으나 상세 시트에 아직 해당 일자 행이 없는 경우 (상세 입력 지연)
+      insights.push(`오늘 30분 이상 지연은 <b>${fmtNum(delayToday)}건</b>입니다. (상세 내역은 아직 입력 전이라 담당자별 구분은 표시되지 않습니다)`);
     } else {
       insights.push(`오늘 30분 이상 지연 건은 없습니다.`);
     }
@@ -1374,6 +1387,36 @@ function render(data){
       </div>
     </header>
 
+    <div class="grid1">
+      <div class="card">
+        <h2>요일별 목표 인입량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
+        <table style="margin-bottom:16px;">
+          <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
+          <tbody>
+            ${[1,2,3,4,5,6].map(wd => {
+              const t = weekdayTargets[wd];
+              const isToday = wd === todayWd;
+              return `<tr style="${isToday?'background:var(--panel-2);':''}">
+                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
+                <td style="font-weight:700;">${weekdayTargetLabel(t)}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? (t.volatile?'범위(최소~중앙값)':'단일(중앙값)') : '-'}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? t.sampleValues.join(', ') : '-'}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 실적 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
+        <table>
+          <thead><tr><th>상담원</th><th>오늘 인입</th><th>상태</th></tr></thead>
+          <tbody>
+            ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
+              <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
+        </div>
+      </div>
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
       <ul class="insight-list">
@@ -1523,36 +1566,6 @@ function render(data){
       </div>
     </div>
 
-    <div class="grid1">
-      <div class="card">
-        <h2>요일별 목표 인입량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
-        <table style="margin-bottom:16px;">
-          <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
-          <tbody>
-            ${[1,2,3,4,5,6].map(wd => {
-              const t = weekdayTargets[wd];
-              const isToday = wd === todayWd;
-              return `<tr style="${isToday?'background:var(--panel-2);':''}">
-                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
-                <td style="font-weight:700;">${weekdayTargetLabel(t)}</td>
-                <td style="font-size:11px;color:var(--ink-dim);">${t ? (t.volatile?'범위(최소~중앙값)':'단일(중앙값)') : '-'}</td>
-                <td style="font-size:11px;color:var(--ink-dim);">${t ? t.sampleValues.join(', ') : '-'}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 실적 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
-        <table>
-          <thead><tr><th>상담원</th><th>오늘 인입</th><th>상태</th></tr></thead>
-          <tbody>
-            ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
-              <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
-        </div>
-      </div>
     </div>
 
     <div class="grid1">
