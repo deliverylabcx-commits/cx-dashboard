@@ -902,6 +902,72 @@ function weekdayTargetLabel(t){
   return t.volatile ? `${Math.round(t.min)}~${Math.round(t.median)}건` : `${Math.round(t.median)}건`;
 }
 
+// 담당자별 기간(주/월) 목표 달성 현황
+// - 근무 스케줄을 반영: 휴무/연차/병가 등은 목표 산정에서 제외
+// - 요일별 목표가 다르므로, 실제 근무한 날의 요일 목표를 누적해 합산 목표를 만든다
+// - 변동성이 큰 요일(화/수/목)은 "최소 기준(min)"으로 달성 판정하고, 권장치(median)는 별도 표시
+function agentTargetAchievement(agents, dateArr, sections, schedule, weekdayTargets){
+  const out = {};
+  agents.forEach(a => {
+    if (TARGET_EXCLUDED_AGENTS.includes(a)) return; // 팀장급 제외
+    let workDays = 0, offDays = 0;
+    let targetMin = 0, targetMedian = 0, actual = 0;
+    const detail = [];
+    (dateArr||[]).forEach(d => {
+      const st = schedule?.schedule?.[a]?.[d];
+      const isOff = st && OFF_STATUSES.includes(st);
+      const wd = weekdayOf(d);
+      if (wd === 0) return; // 일요일 제외
+      const t = weekdayTargets[wd];
+      if (isOff){ offDays++; return; }
+      // 스케줄 정보가 없고 인입도 0이면 근무일로 보지 않음 (미배정/휴무 추정)
+      const inb = sections["상담인입"]?.[a]?.[d] || 0;
+      if (!st && inb === 0) return;
+      workDays++;
+      actual += inb;
+      if (t){ targetMin += t.volatile ? t.min : t.median; targetMedian += t.median; }
+      detail.push({ date:d, wd, inb, target: t ? (t.volatile ? t.min : t.median) : null });
+    });
+    const rateMin = targetMin>0 ? actual/targetMin : null;
+    const rateMedian = targetMedian>0 ? actual/targetMedian : null;
+    out[a] = { workDays, offDays, actual, targetMin, targetMedian, rateMin, rateMedian, detail };
+  });
+  return out;
+}
+function achieveColor(rate){
+  if (rate == null) return "var(--ink-dim)";
+  if (rate >= 1) return "var(--good)";
+  if (rate >= 0.9) return "var(--accent)";
+  return "var(--bad)";
+}
+// 담당자별 목표 달성 카드 (주/월 공용)
+function buildAgentTargetCardHTML(ach, periodLabel){
+  const names = Object.keys(ach);
+  if (!names.length) return '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>';
+  return `
+    <table>
+      <thead><tr><th>상담원</th><th>근무일</th><th>휴무</th><th>${periodLabel} 목표(최소)</th><th>실제 처리량</th><th>달성률</th><th>권장 목표 대비</th></tr></thead>
+      <tbody>
+        ${names.map(a => {
+          const d = ach[a];
+          return `<tr>
+            <td style="text-align:left;">${a}</td>
+            <td>${d.workDays}일</td>
+            <td style="color:var(--ink-dim);">${d.offDays}일</td>
+            <td>${fmtNum(d.targetMin)}건</td>
+            <td style="font-weight:700;">${fmtNum(d.actual)}건</td>
+            <td style="font-weight:800;color:${achieveColor(d.rateMin)};">${d.rateMin!=null?Math.round(d.rateMin*100)+'%':'-'}</td>
+            <td style="font-size:11.5px;color:var(--ink-dim);">${d.rateMedian!=null?Math.round(d.rateMedian*100)+'% (목표 '+fmtNum(d.targetMedian)+'건)':'-'}</td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>
+    <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+      목표는 <b>실제 근무한 날의 요일별 목표만 누적</b>해 산정합니다 (휴무·연차·병가 제외). 변동성이 큰 화/수/목은 최소 기준으로 달성 여부를 판정하고, 권장 목표(중앙값) 대비 수치는 참고용으로 함께 표시합니다. Punisher는 팀장급으로 목표 산정에서 제외됩니다.
+    </div>
+  `;
+}
+
 // 요일별 SKU 배송물량 평균 + 인입량과의 상관계수 (피어슨)
 function pearson(xs, ys){
   const n = xs.length;
@@ -1866,6 +1932,8 @@ function renderWeekly(data){
   const skuWeekTotal = sum(week.dates.map(d => skuRow?.[d] || 0));
   const skuWeekPrevTotal = prevWeek ? sum(prevWeek.dates.map(d => skuRow?.[d] || 0)) : null;
   const weekdayTargetsW = computeWeekdayInboundTargets(dates, sections, agents);
+  const agentAchWeek = agentTargetAchievement(agents, week.dates, sections, schedule, weekdayTargetsW);
+  const agentAchWeekPrev = prevWeek ? agentTargetAchievement(agents, prevWeek.dates, sections, schedule, weekdayTargetsW) : {};
   const inboundOfDateW = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapW);
   const skuCorrWeek = skuInboundCorrelation(week.dates, skuRow, inboundOfDateW);
 
@@ -1922,6 +1990,17 @@ function renderWeekly(data){
     const diff = (absentWeekPrev.rate!=null) ? absentWeek.rate - absentWeekPrev.rate : null;
     const trendTxt = diff==null ? '' : (diff<=0 ? ` (전주 대비 ▼ ${Math.abs(Math.round(diff*100))}%p 개선)` : ` (전주 대비 ▲ ${Math.abs(Math.round(diff*100))}%p 증가)`);
     weeklyInsights.push(`이번 주 부재율은 <b>${fmtPct(absentWeek.rate)}</b>입니다${trendTxt}.`);
+  }
+  {
+    const achNames = Object.keys(agentAchWeek);
+    const met = achNames.filter(a => agentAchWeek[a].rateMin != null && agentAchWeek[a].rateMin >= 1);
+    const missed = achNames.filter(a => agentAchWeek[a].rateMin != null && agentAchWeek[a].rateMin < 1)
+      .sort((x,y) => agentAchWeek[x].rateMin - agentAchWeek[y].rateMin);
+    if (met.length) weeklyInsights.push(`이번 주 목표 처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
+    if (missed.length){
+      const w = missed[0];
+      weeklyInsights.push(`목표 미달 상담원은 <b>${missed.join(", ")}</b>이며, 그중 <b>${w}</b>가 ${Math.round(agentAchWeek[w].rateMin*100)}%로 가장 낮습니다 (근무 ${agentAchWeek[w].workDays}일 기준).`);
+    }
   }
   if (delayWeek.byReason.length){
     const top = delayWeek.byReason[0];
@@ -2067,6 +2146,27 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+      <h2>담당자별 목표 달성 현황 (주간) <span class="tag">근무 스케줄 반영 · ${dateRangeLabel(week.monday, week.saturday)}</span></h2>
+      ${buildAgentTargetCardHTML(agentAchWeek, "주간")}
+      ${Object.keys(agentAchWeekPrev).length ? `
+        <div style="font-size:13px;font-weight:600;margin:18px 0 10px;">전주 대비 달성률 변화</div>
+        <table>
+          <thead><tr><th>상담원</th><th>전주 달성률</th><th>이번 주 달성률</th><th>변화</th></tr></thead>
+          <tbody>
+            ${Object.keys(agentAchWeek).map(a => {
+              const cur = agentAchWeek[a]?.rateMin;
+              const prev = agentAchWeekPrev[a]?.rateMin;
+              const diff = (cur!=null && prev!=null) ? cur-prev : null;
+              return `<tr><td style="text-align:left;">${a}</td>
+                <td>${prev!=null?Math.round(prev*100)+'%':'-'}</td>
+                <td style="font-weight:700;color:${achieveColor(cur)};">${cur!=null?Math.round(cur*100)+'%':'-'}</td>
+                <td style="color:${diff==null?'var(--ink-dim)':(diff>=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff>=0?'▲ ':'▼ ')+Math.abs(Math.round(diff*100))+'%p':'전주 데이터 없음'}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>` : ''}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>부재 현황 (주간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
       <div class="kpis">
         <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentWeek.total)}</div>
@@ -2172,7 +2272,7 @@ function renderWeekly(data){
 
 /* ===================== 월별 리포트 ===================== */
 function renderMonthly(data){
-  const { dates, sections, outcall, delay30, onboardCalls, rawLog, skuRow } = data;
+  const { dates, sections, outcall, delay30, onboardCalls, rawLog, skuRow, schedule } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const months = buildMonthList(dates);
   const app = document.getElementById("app");
@@ -2291,6 +2391,8 @@ function renderMonthly(data){
   const skuMonthTotal = sum(month.dates.map(d => skuRow?.[d] || 0));
   const skuMonthPrevTotal = prevMonth ? sum(prevMonth.dates.map(d => skuRow?.[d] || 0)) : null;
   const weekdayTargetsM = computeWeekdayInboundTargets(dates, sections, agents);
+  const agentAchMonth = agentTargetAchievement(agents, month.dates, sections, schedule, weekdayTargetsM);
+  const agentAchMonthPrev = prevMonth ? agentTargetAchievement(agents, prevMonth.dates, sections, schedule, weekdayTargetsM) : {};
   const inboundOfDateM = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapM);
   const skuCorrMonth = skuInboundCorrelation(month.dates, skuRow, inboundOfDateM);
   const skuWeekdayAvgM = skuByWeekday(month.dates, skuRow, 5);
@@ -2316,6 +2418,17 @@ function renderMonthly(data){
     const diff = (absentMonthPrev.rate!=null) ? absentMonth.rate - absentMonthPrev.rate : null;
     const trendTxt = diff==null ? '' : (diff<=0 ? ` (전월 대비 ▼ ${Math.abs(Math.round(diff*100))}%p 개선)` : ` (전월 대비 ▲ ${Math.abs(Math.round(diff*100))}%p 증가)`);
     monthlyInsights.push(`${month.label} 부재율은 <b>${fmtPct(absentMonth.rate)}</b>입니다${trendTxt}.`);
+  }
+  {
+    const achNames = Object.keys(agentAchMonth);
+    const met = achNames.filter(a => agentAchMonth[a].rateMin != null && agentAchMonth[a].rateMin >= 1);
+    const missed = achNames.filter(a => agentAchMonth[a].rateMin != null && agentAchMonth[a].rateMin < 1)
+      .sort((x,y) => agentAchMonth[x].rateMin - agentAchMonth[y].rateMin);
+    if (met.length) monthlyInsights.push(`${month.label} 목표 처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
+    if (missed.length){
+      const w = missed[0];
+      monthlyInsights.push(`목표 미달 상담원은 <b>${missed.join(", ")}</b>이며, 그중 <b>${w}</b>가 ${Math.round(agentAchMonth[w].rateMin*100)}%로 가장 낮습니다 (근무 ${agentAchMonth[w].workDays}일 기준).`);
+    }
   }
   if (weekBreakdown.length){
     const peak = weekBreakdown.reduce((a,b)=>b.inbound>a.inbound?b:a);
@@ -2509,6 +2622,27 @@ function renderMonthly(data){
         </tbody>
       </table>
       <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">상관계수(r)는 −1~+1 사이 값이며, 상관관계가 인과관계를 뜻하지는 않습니다.</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>담당자별 목표 달성 현황 (월간) <span class="tag">근무 스케줄 반영 · ${month.label}</span></h2>
+      ${buildAgentTargetCardHTML(agentAchMonth, "월간")}
+      ${Object.keys(agentAchMonthPrev).length ? `
+        <div style="font-size:13px;font-weight:600;margin:18px 0 10px;">전월 대비 달성률 변화</div>
+        <table>
+          <thead><tr><th>상담원</th><th>전월 달성률</th><th>${month.label} 달성률</th><th>변화</th></tr></thead>
+          <tbody>
+            ${Object.keys(agentAchMonth).map(a => {
+              const cur = agentAchMonth[a]?.rateMin;
+              const prev = agentAchMonthPrev[a]?.rateMin;
+              const diff = (cur!=null && prev!=null) ? cur-prev : null;
+              return `<tr><td style="text-align:left;">${a}</td>
+                <td>${prev!=null?Math.round(prev*100)+'%':'-'}</td>
+                <td style="font-weight:700;color:${achieveColor(cur)};">${cur!=null?Math.round(cur*100)+'%':'-'}</td>
+                <td style="color:${diff==null?'var(--ink-dim)':(diff>=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff>=0?'▲ ':'▼ ')+Math.abs(Math.round(diff*100))+'%p':'전월 데이터 없음'}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>` : ''}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
