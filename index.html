@@ -847,6 +847,43 @@ function dailyProductivityScores(sections, schedule, agents, d){
   return scores;
 }
 
+// 요일별 인당 목표 인입량 (최근 4주 같은 요일 기준, 팀장급 제외)
+// 안정적인 요일(월/금/토)은 단일 목표(중앙값), 변동성 큰 요일(화/수/목)은 범위 목표(최소~중앙값)로 제시
+const TARGET_EXCLUDED_AGENTS = ["Punisher"]; // 팀장급 등 타겟 산정 모수에서 제외
+const VOLATILE_WEEKDAYS = [2,3,4]; // 0=일,1=월,2=화,3=수,4=목,5=금,6=토
+const WEEKDAY_TARGET_WINDOW = 4; // 최근 N개 같은 요일 표본
+function computeWeekdayInboundTargets(dates, sections, agents){
+  const pool = agents.filter(a => !TARGET_EXCLUDED_AGENTS.includes(a));
+  const byWeekday = Array.from({length:7}, () => []); // 날짜 오래된순 -> 최신순 유지된 dates 배열 순서 그대로 채움
+  dates.forEach(d => {
+    const wd = weekdayOf(d);
+    const workingToday = pool.filter(a => (sections["상담인입"]?.[a]?.[d] || 0) > 0);
+    if (!workingToday.length) return; // 휴무일/데이터 없는 날 제외
+    const total = sum(workingToday.map(a => sections["상담인입"][a][d] || 0));
+    byWeekday[wd].push({ date: d, target: total/workingToday.length });
+  });
+  const result = {};
+  for (let wd = 1; wd <= 6; wd++){ // 일요일(0) 제외, 월~토만
+    const recent = byWeekday[wd].slice(-WEEKDAY_TARGET_WINDOW);
+    if (!recent.length){ result[wd] = null; continue; }
+    const vals = recent.map(r => r.target).sort((a,b)=>a-b);
+    const mid = Math.floor(vals.length/2);
+    const median = vals.length % 2 ? vals[mid] : (vals[mid-1]+vals[mid])/2;
+    const min = vals[0];
+    result[wd] = {
+      volatile: VOLATILE_WEEKDAYS.includes(wd),
+      median, min,
+      sampleDates: recent.map(r => r.date),
+      sampleValues: recent.map(r => Math.round(r.target*10)/10)
+    };
+  }
+  return result;
+}
+function weekdayTargetLabel(t){
+  if (!t) return "-";
+  return t.volatile ? `${Math.round(t.min)}~${Math.round(t.median)}건` : `${Math.round(t.median)}건`;
+}
+
 function lerpColor(hex1, hex2, t){
   const c1 = [1,3,5].map(i => parseInt(hex1.slice(i,i+2),16));
   const c2 = [1,3,5].map(i => parseInt(hex2.slice(i,i+2),16));
@@ -1283,6 +1320,30 @@ function render(data){
   if (agentDetailChart){ agentDetailChart.destroy(); agentDetailChart = null; }
   openAgentPanel = null;
 
+  // 요일별 인당 목표 인입량 (최근 4주 · 팀장급 제외 · 변동성 큰 요일은 범위)
+  const weekdayTargets = computeWeekdayInboundTargets(dates, sections, agents);
+  const todayWd = weekdayOf(today);
+  const todayTarget = weekdayTargets[todayWd];
+  const targetPool = agents.filter(a => !TARGET_EXCLUDED_AGENTS.includes(a));
+  const targetComparisonToday = targetPool.map(a => {
+    const actual = sections["상담인입"]?.[a]?.[today] || 0;
+    const st = schedule?.schedule?.[a]?.[today];
+    const isOff = st && OFF_STATUSES.includes(st);
+    let status = "neutral";
+    if (!isOff && todayTarget){
+      const floor = todayTarget.volatile ? todayTarget.min : todayTarget.median;
+      status = actual >= floor ? "ok" : "low";
+    }
+    return { agent:a, actual, isOff, status };
+  });
+  if (todayTarget){
+    insights.push(`오늘(${WEEKDAY_KO[todayWd]}) 인당 목표 인입량은 <b>${weekdayTargetLabel(todayTarget)}</b>입니다 (최근 4주 기준).`);
+    const lowAgents = targetComparisonToday.filter(c => c.status === "low").map(c => c.agent);
+    if (lowAgents.length){
+      insights.push(`오늘 목표에 못 미친 상담원은 <b>${lowAgents.join(", ")}</b>입니다 — 쏠림 여부 확인이 필요합니다.`);
+    }
+  }
+
   // MBO 공통 목표 달성 현황 (오늘 + 최근 기간 흐름)
   const mboAgents = agents.filter(a => MBO_WEIGHTS[a]);
   const mboToday = Object.fromEntries(mboAgents.map(a => [a, mboScoresForAgent(sections, delay30, outcall, a, today)]));
@@ -1459,6 +1520,38 @@ function render(data){
       <div class="card">
         <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간 누적 (리드타임 특성상 일별 산정 불가)</span></h2>
         ${buildConversionCardHTML(conversionAll)}
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>요일별 목표 인입량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
+        <table style="margin-bottom:16px;">
+          <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
+          <tbody>
+            ${[1,2,3,4,5,6].map(wd => {
+              const t = weekdayTargets[wd];
+              const isToday = wd === todayWd;
+              return `<tr style="${isToday?'background:var(--panel-2);':''}">
+                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
+                <td style="font-weight:700;">${weekdayTargetLabel(t)}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? (t.volatile?'범위(최소~중앙값)':'단일(중앙값)') : '-'}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? t.sampleValues.join(', ') : '-'}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 실적 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
+        <table>
+          <thead><tr><th>상담원</th><th>오늘 인입</th><th>상태</th></tr></thead>
+          <tbody>
+            ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
+              <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
+        </div>
       </div>
     </div>
 
