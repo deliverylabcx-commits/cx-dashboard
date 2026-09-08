@@ -369,6 +369,14 @@ function parseCSV(text){
 
   const sections = {};
   let totalRow = null;
+  let skuRow = null; // SKU(배송물량) - 헤더 위쪽에 있을 수 있어 전체 행에서 별도로 탐색
+  rows.forEach(r => {
+    if (!r || r.length < 3) return;
+    if ((r[2] || "").trim() === "SKU(배송물량)"){
+      skuRow = {};
+      dateCols.forEach(({col,date}) => { skuRow[date] = toNum(r[col]); });
+    }
+  });
   let currentSection = null;
   const SECTION_ROW_LIMITS = { "카테고리별 이슈": 8, "부재율": 2 }; // 정해진 줄 수를 넘으면 이후 동일 라벨 재사용(WOW 델타 등)으로 간주해 차단
   let sectionRowCount = 0;
@@ -401,7 +409,7 @@ function parseCSV(text){
     if (limit != null) sectionRowCount++;
   }
 
-  return { dates: dateCols.map(d=>d.date), sections, totalRow };
+  return { dates: dateCols.map(d=>d.date), sections, totalRow, skuRow };
 }
 
 function toNum(v){
@@ -894,6 +902,48 @@ function weekdayTargetLabel(t){
   return t.volatile ? `${Math.round(t.min)}~${Math.round(t.median)}건` : `${Math.round(t.median)}건`;
 }
 
+// 요일별 SKU 배송물량 평균 + 인입량과의 상관계수 (피어슨)
+function pearson(xs, ys){
+  const n = xs.length;
+  if (n < 3) return null;
+  const mx = sum(xs)/n, my = sum(ys)/n;
+  let num=0, dx=0, dy=0;
+  for (let i=0;i<n;i++){ const a=xs[i]-mx, b=ys[i]-my; num+=a*b; dx+=a*a; dy+=b*b; }
+  if (dx===0 || dy===0) return null;
+  return num/Math.sqrt(dx*dy);
+}
+function corrLabel(r){
+  if (r == null) return "표본 부족";
+  const a = Math.abs(r);
+  const strength = a>=0.7 ? "강한" : a>=0.4 ? "뚜렷한" : a>=0.2 ? "약한" : "거의 없는";
+  const dir = r>=0 ? "양(+)의" : "음(−)의";
+  return `${strength} ${dir} 상관 (r=${r.toFixed(2)})`;
+}
+// 날짜 배열에 대해 SKU 물량과 인입량 쌍을 만들어 상관계수 계산
+function skuInboundCorrelation(dateArr, skuRow, inboundOf){
+  const xs=[], ys=[];
+  (dateArr||[]).forEach(d => {
+    const sku = skuRow?.[d];
+    const inb = inboundOf(d);
+    if (sku != null && sku > 0 && inb != null && inb > 0){ xs.push(sku); ys.push(inb); }
+  });
+  return { r: pearson(xs, ys), n: xs.length };
+}
+// 요일별 SKU 평균 (최근 N개 같은 요일)
+function skuByWeekday(dates, skuRow, windowN){
+  const byWd = Array.from({length:7}, () => []);
+  (dates||[]).forEach(d => {
+    const v = skuRow?.[d];
+    if (v != null && v > 0) byWd[weekdayOf(d)].push(v);
+  });
+  const out = {};
+  for (let wd=1; wd<=6; wd++){
+    const recent = byWd[wd].slice(-(windowN||4));
+    out[wd] = recent.length ? sum(recent)/recent.length : null;
+  }
+  return out;
+}
+
 function lerpColor(hex1, hex2, t){
   const c1 = [1,3,5].map(i => parseInt(hex1.slice(i,i+2),16));
   const c2 = [1,3,5].map(i => parseInt(hex2.slice(i,i+2),16));
@@ -1046,7 +1096,7 @@ function buildWeekList(dates){
 function render(data){
   if (viewMode === "weekly"){ renderWeekly(data); return; }
   if (viewMode === "monthly"){ renderMonthly(data); return; }
-  const { dates, sections, totalRow, schedule, outcall, delay30, delayHold, rawLog, onboardCalls } = data;
+  const { dates, sections, totalRow, skuRow, schedule, outcall, delay30, delayHold, rawLog, onboardCalls } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
 
   let todayIdx;
@@ -1335,6 +1385,19 @@ function render(data){
 
   // 요일별 인당 목표 인입량 (최근 4주 · 팀장급 제외 · 변동성 큰 요일은 범위)
   const weekdayTargets = computeWeekdayInboundTargets(dates, sections, agents);
+
+  // SKU 배송물량 지표 (요일별 평균 + 인입량 상관도 + 전주 동요일 비교)
+  const inboundOfDate = (d) => totalInboundOn(d, totalRow, sections, agents, depMap);
+  const skuToday = skuRow?.[today] ?? null;
+  const skuWow = wowDate!=null ? (skuRow?.[wowDate] ?? null) : null;
+  const skuWowDelta = (skuToday!=null && skuWow!=null && skuWow>0) ? (skuToday-skuWow)/skuWow : null;
+  const skuWeekdayAvg = skuByWeekday(dates, skuRow, 4);
+  const skuCorrAll = skuInboundCorrelation(dates, skuRow, inboundOfDate);
+  const skuCorrByWeekday = {};
+  for (let wd=1; wd<=6; wd++){
+    const wdDates = dates.filter(d => weekdayOf(d) === wd);
+    skuCorrByWeekday[wd] = skuInboundCorrelation(wdDates, skuRow, inboundOfDate);
+  }
   const todayWd = weekdayOf(today);
   const todayTarget = weekdayTargets[todayWd];
   const targetPool = agents.filter(a => !TARGET_EXCLUDED_AGENTS.includes(a));
@@ -1350,7 +1413,7 @@ function render(data){
     return { agent:a, actual, isOff, status };
   });
   if (todayTarget){
-    insights.push(`오늘(${WEEKDAY_KO[todayWd]}) 인당 목표 인입량은 <b>${weekdayTargetLabel(todayTarget)}</b>입니다 (최근 4주 기준).`);
+    insights.push(`오늘(${WEEKDAY_KO[todayWd]}) 인당 목표 처리량은 <b>${weekdayTargetLabel(todayTarget)}</b>입니다 (최근 4주 기준).`);
     const lowAgents = targetComparisonToday.filter(c => c.status === "low").map(c => c.agent);
     if (lowAgents.length){
       insights.push(`오늘 목표에 못 미친 상담원은 <b>${lowAgents.join(", ")}</b>입니다 — 쏠림 여부 확인이 필요합니다.`);
@@ -1389,7 +1452,7 @@ function render(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>요일별 목표 인입량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
+        <h2>요일별 목표 처리량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
         <table style="margin-bottom:16px;">
           <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
           <tbody>
@@ -1407,7 +1470,7 @@ function render(data){
         </table>
         <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 실적 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
         <table>
-          <thead><tr><th>상담원</th><th>오늘 인입</th><th>상태</th></tr></thead>
+          <thead><tr><th>상담원</th><th>오늘 처리량</th><th>상태</th></tr></thead>
           <tbody>
             ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
               <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
@@ -1417,6 +1480,39 @@ function render(data){
           목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
         </div>
       </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>SKU 배송물량 · 인입량 상관도 <span class="tag">요일별 · 최근 4주 평균</span></h2>
+        <div class="kpis" style="margin-bottom:16px;">
+          <div class="kpi"><div class="label">${dateLabel(today)} 배송물량(SKU)</div><div class="val">${fmtNum(skuToday)}</div>
+            <div class="delta ${skuWowDelta==null?'':(skuWowDelta>=0?'up':'down')}">${skuWowDelta!=null ? (skuWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(skuWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+            ${skuWow!=null?`<div class="delta" style="font-size:10.5px;">전주 ${fmtNum(skuWow)} → 금주 ${fmtNum(skuToday)}</div>`:''}</div>
+          <div class="kpi"><div class="label">물량-인입 상관도 (전체)</div><div class="val" style="font-size:18px;">${skuCorrAll.r!=null?skuCorrAll.r.toFixed(2):'-'}</div>
+            <div class="delta">${corrLabel(skuCorrAll.r)} · 표본 ${skuCorrAll.n}일</div></div>
+        </div>
+        <table>
+          <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 처리량</th><th>물량-인입 상관도</th></tr></thead>
+          <tbody>
+            ${[1,2,3,4,5,6].map(wd => {
+              const isToday = wd === todayWd;
+              const c = skuCorrByWeekday[wd];
+              return `<tr style="${isToday?'background:var(--panel-2);':''}">
+                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
+                <td>${fmtNum(skuWeekdayAvg[wd])}</td>
+                <td>${weekdayTargetLabel(weekdayTargets[wd])}</td>
+                <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          상관계수(r)는 −1~+1 사이 값으로, +1에 가까울수록 "배송물량이 많은 날 상담인입도 많다"는 관계가 강함을 뜻합니다. 상관관계는 인과관계가 아니며, 표본이 적은 요일은 참고용으로만 보시길 권합니다.
+        </div>
+      </div>
+    </div>
+
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
       <ul class="insight-list">
@@ -1682,7 +1778,7 @@ function destroyCharts(){
 
 /* ===================== 주간 리포트 ===================== */
 function renderWeekly(data){
-  const { dates, sections, outcall, delay30, schedule, rawLog, onboardCalls } = data;
+  const { dates, sections, outcall, delay30, schedule, rawLog, onboardCalls, skuRow } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const weeks = buildWeekList(dates);
   const app = document.getElementById("app");
@@ -1765,6 +1861,13 @@ function renderWeekly(data){
   }
   const absentWeek = absentWeekStats(week);
   const absentWeekPrev = absentWeekStats(prevWeek);
+
+  // SKU 배송물량 주간 집계 + 요일별 목표 처리량
+  const skuWeekTotal = sum(week.dates.map(d => skuRow?.[d] || 0));
+  const skuWeekPrevTotal = prevWeek ? sum(prevWeek.dates.map(d => skuRow?.[d] || 0)) : null;
+  const weekdayTargetsW = computeWeekdayInboundTargets(dates, sections, agents);
+  const inboundOfDateW = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapW);
+  const skuCorrWeek = skuInboundCorrelation(week.dates, skuRow, inboundOfDateW);
 
   // 담당자별 생산성 주간 지표
   function agentWeekProductivity(w){
@@ -1937,6 +2040,33 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+    <div class="card" style="margin-bottom:16px;">
+      <h2>SKU 배송물량 & 요일별 목표 처리량 (주간)</h2>
+      <div class="kpis" style="margin-bottom:16px;">
+        <div class="kpi"><div class="label">주간 배송물량 합계</div><div class="val">${fmtNum(skuWeekTotal)}</div>
+          <div class="delta">${wowText(skuWeekTotal, skuWeekPrevTotal)}</div></div>
+        <div class="kpi"><div class="label">물량-인입 상관도</div><div class="val" style="font-size:18px;">${skuCorrWeek.r!=null?skuCorrWeek.r.toFixed(2):'-'}</div>
+          <div class="delta">${corrLabel(skuCorrWeek.r)} · 표본 ${skuCorrWeek.n}일</div></div>
+      </div>
+      <table>
+        <thead><tr><th>요일</th><th>날짜</th><th>배송물량(SKU)</th><th>목표 처리량(인당)</th><th>실제 인입</th></tr></thead>
+        <tbody>
+          ${week.dates.map(d => {
+            const wd = weekdayOf(d);
+            return `<tr>
+              <td style="text-align:left;">${WEEKDAY_KO[wd]}</td>
+              <td>${d}</td>
+              <td>${fmtNum(skuRow?.[d])}</td>
+              <td>${weekdayTargetLabel(weekdayTargetsW[wd])}</td>
+              <td>${fmtNum(inboundOfDateW(d))}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">목표 처리량은 최근 4주 같은 요일 기준(Punisher 제외) · 화/수/목은 변동성이 커 범위로 제시합니다.</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>부재 현황 (주간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
       <div class="kpis">
         <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentWeek.total)}</div>
@@ -2042,7 +2172,7 @@ function renderWeekly(data){
 
 /* ===================== 월별 리포트 ===================== */
 function renderMonthly(data){
-  const { dates, sections, outcall, delay30, onboardCalls, rawLog } = data;
+  const { dates, sections, outcall, delay30, onboardCalls, rawLog, skuRow } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const months = buildMonthList(dates);
   const app = document.getElementById("app");
@@ -2156,6 +2286,18 @@ function renderMonthly(data){
   }
   const absentMonth = absentMonthStats(month.dates);
   const absentMonthPrev = absentMonthStats(prevMonth?.dates);
+
+  // SKU 배송물량 월간 집계 + 요일별 목표 처리량 + 상관도
+  const skuMonthTotal = sum(month.dates.map(d => skuRow?.[d] || 0));
+  const skuMonthPrevTotal = prevMonth ? sum(prevMonth.dates.map(d => skuRow?.[d] || 0)) : null;
+  const weekdayTargetsM = computeWeekdayInboundTargets(dates, sections, agents);
+  const inboundOfDateM = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapM);
+  const skuCorrMonth = skuInboundCorrelation(month.dates, skuRow, inboundOfDateM);
+  const skuWeekdayAvgM = skuByWeekday(month.dates, skuRow, 5);
+  const skuCorrByWeekdayM = {};
+  for (let wd=1; wd<=6; wd++){
+    skuCorrByWeekdayM[wd] = skuInboundCorrelation(month.dates.filter(d => weekdayOf(d)===wd), skuRow, inboundOfDateM);
+  }
 
   // 이번 달 내 주차별 breakdown (월별 vs 주차별 비교용)
   const weeksInMonth = buildWeekList(month.dates);
@@ -2341,6 +2483,32 @@ function renderMonthly(data){
         ${issueMonth.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
           <div class="delta" style="font-size:11px;">${wowText(x.total, issueMonthPrevMap[x.category])}</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
       </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+    <div class="card" style="margin-bottom:16px;">
+      <h2>SKU 배송물량 & 요일별 목표 처리량 (월간)</h2>
+      <div class="kpis" style="margin-bottom:16px;">
+        <div class="kpi"><div class="label">월간 배송물량 합계</div><div class="val">${fmtNum(skuMonthTotal)}</div>
+          <div class="delta">${wowText(skuMonthTotal, skuMonthPrevTotal)}</div></div>
+        <div class="kpi"><div class="label">물량-인입 상관도</div><div class="val" style="font-size:18px;">${skuCorrMonth.r!=null?skuCorrMonth.r.toFixed(2):'-'}</div>
+          <div class="delta">${corrLabel(skuCorrMonth.r)} · 표본 ${skuCorrMonth.n}일</div></div>
+      </div>
+      <table>
+        <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 처리량(인당)</th><th>물량-인입 상관도</th></tr></thead>
+        <tbody>
+          ${[1,2,3,4,5,6].map(wd => {
+            const c = skuCorrByWeekdayM[wd];
+            return `<tr>
+              <td style="text-align:left;">${WEEKDAY_KO[wd]}</td>
+              <td>${fmtNum(skuWeekdayAvgM[wd])}</td>
+              <td>${weekdayTargetLabel(weekdayTargetsM[wd])}</td>
+              <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">상관계수(r)는 −1~+1 사이 값이며, 상관관계가 인과관계를 뜻하지는 않습니다.</div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
