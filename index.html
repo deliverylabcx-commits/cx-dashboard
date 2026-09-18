@@ -865,23 +865,23 @@ function dailyProductivityScores(sections, schedule, agents, d){
   return scores;
 }
 
-// 요일별 인당 목표 인입량 (최근 4주 같은 요일 기준, 팀장급 제외)
+// 요일별 인당 목표량 (최근 4주 같은 요일 기준, 팀장급 제외) - 제네릭: metricFn(agent, date)로 어떤 실적이든 적용 가능
 // 안정적인 요일(월/금/토)은 단일 목표(중앙값), 변동성 큰 요일(화/수/목)은 범위 목표(최소~중앙값)로 제시
 const TARGET_EXCLUDED_AGENTS = ["Punisher"]; // 팀장급 등 타겟 산정 모수에서 제외
 const VOLATILE_WEEKDAYS = [2,3,4]; // 0=일,1=월,2=화,3=수,4=목,5=금,6=토
 const WEEKDAY_TARGET_WINDOW = 4; // 최근 N개 같은 요일 표본
-function computeWeekdayInboundTargets(dates, sections, agents){
+function computeWeekdayTargetGeneric(dates, agents, metricFn){
   const pool = agents.filter(a => !TARGET_EXCLUDED_AGENTS.includes(a));
-  const byWeekday = Array.from({length:7}, () => []); // 날짜 오래된순 -> 최신순 유지된 dates 배열 순서 그대로 채움
+  const byWeekday = Array.from({length:7}, () => []);
   dates.forEach(d => {
     const wd = weekdayOf(d);
-    const workingToday = pool.filter(a => (sections["상담인입"]?.[a]?.[d] || 0) > 0);
-    if (!workingToday.length) return; // 휴무일/데이터 없는 날 제외
-    const total = sum(workingToday.map(a => sections["상담인입"][a][d] || 0));
+    const workingToday = pool.filter(a => (metricFn(a,d) || 0) > 0);
+    if (!workingToday.length) return; // 실적 없는 날(휴무/미가동) 제외
+    const total = sum(workingToday.map(a => metricFn(a,d) || 0));
     byWeekday[wd].push({ date: d, target: total/workingToday.length });
   });
   const result = {};
-  for (let wd = 1; wd <= 6; wd++){ // 일요일(0) 제외, 월~토만
+  for (let wd = 1; wd <= 6; wd++){
     const recent = byWeekday[wd].slice(-WEEKDAY_TARGET_WINDOW);
     if (!recent.length){ result[wd] = null; continue; }
     const vals = recent.map(r => r.target).sort((a,b)=>a-b);
@@ -897,16 +897,22 @@ function computeWeekdayInboundTargets(dates, sections, agents){
   }
   return result;
 }
+function computeWeekdayInboundTargets(dates, sections, agents){
+  return computeWeekdayTargetGeneric(dates, agents, (a,d) => sections["상담인입"]?.[a]?.[d]);
+}
+function computeWeekdayOutcallTargets(dates, outcall, category, agents){
+  return computeWeekdayTargetGeneric(dates, agents, (a,d) => outcall?.data?.[category]?.[a]?.["통화완료"]?.[d]);
+}
 function weekdayTargetLabel(t){
   if (!t) return "-";
   return t.volatile ? `${Math.round(t.min)}~${Math.round(t.median)}건` : `${Math.round(t.median)}건`;
 }
 
-// 담당자별 기간(주/월) 목표 달성 현황
+// 담당자별 기간(일/주/월) 목표 달성 현황 - 제네릭: metricFn(agent, date)로 어떤 실적이든 적용 가능
 // - 근무 스케줄을 반영: 휴무/연차/병가 등은 목표 산정에서 제외
 // - 요일별 목표가 다르므로, 실제 근무한 날의 요일 목표를 누적해 합산 목표를 만든다
 // - 변동성이 큰 요일(화/수/목)은 "최소 기준(min)"으로 달성 판정하고, 권장치(median)는 별도 표시
-function agentTargetAchievement(agents, dateArr, sections, schedule, weekdayTargets){
+function agentTargetAchievementGeneric(agents, dateArr, schedule, weekdayTargets, metricFn){
   const out = {};
   agents.forEach(a => {
     if (TARGET_EXCLUDED_AGENTS.includes(a)) return; // 팀장급 제외
@@ -920,17 +926,39 @@ function agentTargetAchievement(agents, dateArr, sections, schedule, weekdayTarg
       if (wd === 0) return; // 일요일 제외
       const t = weekdayTargets[wd];
       if (isOff){ offDays++; return; }
-      // 스케줄 정보가 없고 인입도 0이면 근무일로 보지 않음 (미배정/휴무 추정)
-      const inb = sections["상담인입"]?.[a]?.[d] || 0;
-      if (!st && inb === 0) return;
+      const val = metricFn(a,d) || 0;
+      // 스케줄 정보가 없고 실적도 0이면 근무일로 보지 않음 (미배정/휴무 추정)
+      if (!st && val === 0) return;
       workDays++;
-      actual += inb;
+      actual += val;
       if (t){ targetMin += t.volatile ? t.min : t.median; targetMedian += t.median; }
-      detail.push({ date:d, wd, inb, target: t ? (t.volatile ? t.min : t.median) : null });
+      detail.push({ date:d, wd, val, target: t ? (t.volatile ? t.min : t.median) : null });
     });
     const rateMin = targetMin>0 ? actual/targetMin : null;
     const rateMedian = targetMedian>0 ? actual/targetMedian : null;
     out[a] = { workDays, offDays, actual, targetMin, targetMedian, rateMin, rateMedian, detail };
+  });
+  return out;
+}
+function agentTargetAchievement(agents, dateArr, sections, schedule, weekdayTargets){
+  return agentTargetAchievementGeneric(agents, dateArr, schedule, weekdayTargets, (a,d) => sections["상담인입"]?.[a]?.[d]);
+}
+function agentOutcallTargetAchievement(agents, dateArr, outcall, category, schedule, weekdayTargets){
+  return agentTargetAchievementGeneric(agents, dateArr, schedule, weekdayTargets, (a,d) => outcall?.data?.[category]?.[a]?.["통화완료"]?.[d]);
+}
+// 담당자별·카테고리별 통화완료율 (기간 합산 기준) - 타겟(OUTCALL_TARGET_RATE) 대비 판정용
+function agentOutcallRateForPeriod(agents, dateArr, outcall, category, schedule){
+  const out = {};
+  agents.forEach(a => {
+    if (TARGET_EXCLUDED_AGENTS.includes(a)) return;
+    let inbound=0, completed=0;
+    (dateArr||[]).forEach(d => {
+      const st = schedule?.schedule?.[a]?.[d];
+      if (st && OFF_STATUSES.includes(st)) return;
+      inbound += outcall?.data?.[category]?.[a]?.["인입"]?.[d] || 0;
+      completed += outcall?.data?.[category]?.[a]?.["통화완료"]?.[d] || 0;
+    });
+    out[a] = { inbound, completed, rate: inbound>0 ? completed/inbound : null };
   });
   return out;
 }
@@ -967,6 +995,35 @@ function buildAgentTargetCardHTML(ach, periodLabel){
     </div>
   `;
 }
+
+// 아웃콜 카테고리별 담당자 목표 달성 카드 (일/주/월 공용) - 통화완료 목표량 + 통화완료율 타겟(OUTCALL_TARGET_RATE) 병행 판정
+function buildOutcallTargetCardHTML(category, ach, rateStats, periodLabel){
+  const names = Object.keys(ach);
+  if (!names.length) return `<div style="color:var(--ink-dim);font-size:13px;">${catLabel(category)} 데이터 없음</div>`;
+  return `
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${catLabel(category)} <span style="font-weight:400;color:var(--ink-dim);font-size:11px;">· 통화완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></div>
+    <table style="margin-bottom:16px;">
+      <thead><tr><th>상담원</th><th>근무일</th><th>${periodLabel} 목표량(최소)</th><th>실제 통화완료</th><th>물량 달성률</th><th>통화완료율</th><th>율 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%) 대비</th></tr></thead>
+      <tbody>
+        ${names.map(a => {
+          const d = ach[a];
+          const r = rateStats[a] || { rate: null };
+          const rateOk = r.rate!=null && r.rate >= OUTCALL_TARGET_RATE;
+          return `<tr>
+            <td style="text-align:left;">${a}</td>
+            <td>${d.workDays}일</td>
+            <td>${fmtNum(d.targetMin)}건</td>
+            <td style="font-weight:700;">${fmtNum(d.actual)}건</td>
+            <td style="font-weight:800;color:${achieveColor(d.rateMin)};">${d.rateMin!=null?Math.round(d.rateMin*100)+'%':'-'}</td>
+            <td>${fmtPct(r.rate)}</td>
+            <td style="font-weight:700;color:${r.rate==null?'var(--ink-dim)':(rateOk?'var(--good)':'var(--bad)')};">${r.rate!=null?(rateOk?'달성':'미달'):'-'}</td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
 
 // 요일별 SKU 배송물량 평균 + 인입량과의 상관계수 (피어슨)
 function pearson(xs, ys){
@@ -1452,6 +1509,18 @@ function render(data){
   // 요일별 인당 목표 인입량 (최근 4주 · 팀장급 제외 · 변동성 큰 요일은 범위)
   const weekdayTargets = computeWeekdayInboundTargets(dates, sections, agents);
 
+  // 아웃콜 카테고리별 담당자 목표 달성 (당일)
+  const outcallCats = outcall?.categories || [];
+  const outcallWeekdayTargets = {};
+  const outcallAchToday = {};
+  const outcallRateToday = {};
+  outcallCats.forEach(cat => {
+    const t = computeWeekdayOutcallTargets(dates, outcall, cat, agents);
+    outcallWeekdayTargets[cat] = t;
+    outcallAchToday[cat] = agentOutcallTargetAchievement(agents, [today], outcall, cat, schedule, t);
+    outcallRateToday[cat] = agentOutcallRateForPeriod(agents, [today], outcall, cat, schedule);
+  });
+
   // SKU 배송물량 지표 (요일별 평균 + 인입량 상관도 + 전주 동요일 비교)
   const inboundOfDate = (d) => totalInboundOn(d, totalRow, sections, agents, depMap);
   const skuToday = skuRow?.[today] ?? null;
@@ -1575,6 +1644,16 @@ function render(data){
         </table>
         <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
           상관계수(r)는 −1~+1 사이 값으로, +1에 가까울수록 "배송물량이 많은 날 상담인입도 많다"는 관계가 강함을 뜻합니다. 상관관계는 인과관계가 아니며, 표본이 적은 요일은 참고용으로만 보시길 권합니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>아웃콜 목표 달성 현황 <span class="tag">${dateLabel(today)} · 카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallCats.map(cat => buildOutcallTargetCardHTML(cat, outcallAchToday[cat], outcallRateToday[cat], "당일")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;line-height:1.6;">
+          통화량 목표는 CS 처리량과 동일한 방식(최근 4주 같은 요일 · 근무일 기준 · Punisher 제외)으로 산정합니다. 통화완료율 타겟은 카테고리 공통 ${Math.round(OUTCALL_TARGET_RATE*100)}%입니다.
         </div>
       </div>
     </div>
@@ -1937,6 +2016,16 @@ function renderWeekly(data){
   const inboundOfDateW = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapW);
   const skuCorrWeek = skuInboundCorrelation(week.dates, skuRow, inboundOfDateW);
 
+  // 아웃콜 카테고리별 담당자 목표 달성 (주간)
+  const outcallCatsW = outcall?.categories || [];
+  const outcallAchWeek = {};
+  const outcallRateWeek = {};
+  outcallCatsW.forEach(cat => {
+    const t = computeWeekdayOutcallTargets(dates, outcall, cat, agents);
+    outcallAchWeek[cat] = agentOutcallTargetAchievement(agents, week.dates, outcall, cat, schedule, t);
+    outcallRateWeek[cat] = agentOutcallRateForPeriod(agents, week.dates, outcall, cat, schedule);
+  });
+
   // 담당자별 생산성 주간 지표
   function agentWeekProductivity(w){
     if (!w) return {};
@@ -2164,6 +2253,11 @@ function renderWeekly(data){
             }).join("")}
           </tbody>
         </table>` : ''}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>아웃콜 목표 달성 현황 (주간) <span class="tag">카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+      ${outcallCatsW.map(cat => buildOutcallTargetCardHTML(cat, outcallAchWeek[cat], outcallRateWeek[cat], "주간")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -2396,6 +2490,15 @@ function renderMonthly(data){
   const inboundOfDateM = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapM);
   const skuCorrMonth = skuInboundCorrelation(month.dates, skuRow, inboundOfDateM);
   const skuWeekdayAvgM = skuByWeekday(month.dates, skuRow, 5);
+  // 아웃콜 카테고리별 담당자 목표 달성 (월간)
+  const outcallCatsM = outcall?.categories || [];
+  const outcallAchMonth = {};
+  const outcallRateMonth = {};
+  outcallCatsM.forEach(cat => {
+    const t = computeWeekdayOutcallTargets(dates, outcall, cat, agents);
+    outcallAchMonth[cat] = agentOutcallTargetAchievement(agents, month.dates, outcall, cat, schedule, t);
+    outcallRateMonth[cat] = agentOutcallRateForPeriod(agents, month.dates, outcall, cat, schedule);
+  });
   const skuCorrByWeekdayM = {};
   for (let wd=1; wd<=6; wd++){
     skuCorrByWeekdayM[wd] = skuInboundCorrelation(month.dates.filter(d => weekdayOf(d)===wd), skuRow, inboundOfDateM);
@@ -2643,6 +2746,11 @@ function renderMonthly(data){
             }).join("")}
           </tbody>
         </table>` : ''}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>아웃콜 목표 달성 현황 (월간) <span class="tag">카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+      ${outcallCatsM.map(cat => buildOutcallTargetCardHTML(cat, outcallAchMonth[cat], outcallRateMonth[cat], "월간")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
