@@ -109,7 +109,7 @@ function scheduleStatusColor(st){
   return "var(--good)";
 }
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
-const OUTCALL_TARGET_RATE = 0.50; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
+const OUTCALL_TARGET_RATE = 0.70; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
 const LEAD_TIME_CAP_MIN = 180; // 30분 지연건 평균 소요시간(참고) 계산 시, 이 값(3시간)을 넘는 값은 데이터 오류로 간주해 제외
 const LETTERING_START = "8/11"; // 모바일 레터링 서비스 운영 시작일 - 전후 비교 기준
 const UNPROCESSED_STATES = ["missed","opened","snoozed"]; // 미처리로 집계할 상태값 (closed=종료, initial=미배정 대기는 제외)
@@ -1003,7 +1003,7 @@ function buildOutcallTargetCardHTML(category, ach, rateStats, periodLabel){
   return `
     <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${catLabel(category)} <span style="font-weight:400;color:var(--ink-dim);font-size:11px;">· 통화완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></div>
     <table style="margin-bottom:16px;">
-      <thead><tr><th>상담원</th><th>근무일</th><th>${periodLabel} 목표량(최소)</th><th>실제 통화완료</th><th>물량 달성률</th><th>통화완료율</th><th>율 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%) 대비</th></tr></thead>
+      <thead><tr><th>상담원</th><th>근무일</th><th>${periodLabel} 목표량(최소)</th><th>실제 통화완료</th><th>달성률</th><th>통화완료율</th><th>율 타겟(${Math.round(OUTCALL_TARGET_RATE*100)}%) 대비</th></tr></thead>
       <tbody>
         ${names.map(a => {
           const d = ach[a];
@@ -1548,7 +1548,7 @@ function render(data){
     return { agent:a, actual, isOff, status };
   });
   if (todayTarget){
-    insights.push(`오늘(${WEEKDAY_KO[todayWd]}) 인당 목표 처리량은 <b>${weekdayTargetLabel(todayTarget)}</b>입니다 (최근 4주 기준).`);
+    insights.push(`오늘(${WEEKDAY_KO[todayWd]}) 인당 목표 CS처리량은 <b>${weekdayTargetLabel(todayTarget)}</b>입니다 (최근 4주 기준).`);
     const lowAgents = targetComparisonToday.filter(c => c.status === "low").map(c => c.agent);
     if (lowAgents.length){
       insights.push(`오늘 목표에 못 미친 상담원은 <b>${lowAgents.join(", ")}</b>입니다 — 쏠림 여부 확인이 필요합니다.`);
@@ -1585,79 +1585,6 @@ function render(data){
       </div>
     </header>
 
-    <div class="grid1">
-      <div class="card">
-        <h2>요일별 목표 처리량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
-        <table style="margin-bottom:16px;">
-          <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
-          <tbody>
-            ${[1,2,3,4,5,6].map(wd => {
-              const t = weekdayTargets[wd];
-              const isToday = wd === todayWd;
-              return `<tr style="${isToday?'background:var(--panel-2);':''}">
-                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
-                <td style="font-weight:700;">${weekdayTargetLabel(t)}</td>
-                <td style="font-size:11px;color:var(--ink-dim);">${t ? (t.volatile?'범위(최소~중앙값)':'단일(중앙값)') : '-'}</td>
-                <td style="font-size:11px;color:var(--ink-dim);">${t ? t.sampleValues.join(', ') : '-'}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 실적 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
-        <table>
-          <thead><tr><th>상담원</th><th>오늘 처리량</th><th>상태</th></tr></thead>
-          <tbody>
-            ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
-              <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
-        </div>
-      </div>
-    </div>
-
-    <div class="grid1">
-      <div class="card">
-        <h2>SKU 배송물량 · 인입량 상관도 <span class="tag">요일별 · 최근 4주 평균</span></h2>
-        <div class="kpis" style="margin-bottom:16px;">
-          <div class="kpi"><div class="label">${dateLabel(today)} 배송물량(SKU)</div><div class="val">${fmtNum(skuToday)}</div>
-            <div class="delta ${skuWowDelta==null?'':(skuWowDelta>=0?'up':'down')}">${skuWowDelta!=null ? (skuWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(skuWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
-            ${skuWow!=null?`<div class="delta" style="font-size:10.5px;">전주 ${fmtNum(skuWow)} → 금주 ${fmtNum(skuToday)}</div>`:''}</div>
-          <div class="kpi"><div class="label">물량-인입 상관도 (전체)</div><div class="val" style="font-size:18px;">${skuCorrAll.r!=null?skuCorrAll.r.toFixed(2):'-'}</div>
-            <div class="delta">${corrLabel(skuCorrAll.r)} · 표본 ${skuCorrAll.n}일</div></div>
-        </div>
-        <table>
-          <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 처리량</th><th>물량-인입 상관도</th></tr></thead>
-          <tbody>
-            ${[1,2,3,4,5,6].map(wd => {
-              const isToday = wd === todayWd;
-              const c = skuCorrByWeekday[wd];
-              return `<tr style="${isToday?'background:var(--panel-2);':''}">
-                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
-                <td>${fmtNum(skuWeekdayAvg[wd])}</td>
-                <td>${weekdayTargetLabel(weekdayTargets[wd])}</td>
-                <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          상관계수(r)는 −1~+1 사이 값으로, +1에 가까울수록 "배송물량이 많은 날 상담인입도 많다"는 관계가 강함을 뜻합니다. 상관관계는 인과관계가 아니며, 표본이 적은 요일은 참고용으로만 보시길 권합니다.
-        </div>
-      </div>
-    </div>
-
-    <div class="grid1">
-      <div class="card">
-        <h2>아웃콜 목표 달성 현황 <span class="tag">${dateLabel(today)} · 카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
-        ${outcallCats.map(cat => buildOutcallTargetCardHTML(cat, outcallAchToday[cat], outcallRateToday[cat], "당일")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
-        <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;line-height:1.6;">
-          통화량 목표는 CS 처리량과 동일한 방식(최근 4주 같은 요일 · 근무일 기준 · Punisher 제외)으로 산정합니다. 통화완료율 타겟은 카테고리 공통 ${Math.round(OUTCALL_TARGET_RATE*100)}%입니다.
-        </div>
-      </div>
-    </div>
-
     <div class="card" style="margin-bottom:16px;">
       <h2>인사이트</h2>
       <ul class="insight-list">
@@ -1686,6 +1613,114 @@ function render(data){
         <div class="delta ${absentDelta==null?'':(absentDelta<=0?'up':'down')}">${absentDelta!=null ? (absentDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
         <div class="delta" style="font-size:10.5px;">부재율 ${absentRateDelta!=null ? (absentRateDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentRateDelta*100))+'%p' : '-'} · 목표 미설정(참고)</div></div>
     </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>담당자별 CS처리 / 아웃콜 배정 현황 <span class="tag">${dateLabel(today)}</span></h2>
+        <table>
+          <thead><tr><th>상담원</th><th>근무</th><th>CS 인입</th><th>CS 완료</th>${outcallCats.map(c=>`<th>${catLabel(c)}</th>`).join("")}<th>아웃콜 합계</th></tr></thead>
+          <tbody>
+            ${agents.map(a => {
+              const st = schedule?.schedule?.[a]?.[today];
+              const isOff = st && OFF_STATUSES.includes(st);
+              const inb = sections["상담인입"]?.[a]?.[today] || 0;
+              const comp = sections["상담완료"]?.[a]?.[today] || 0;
+              const per = outcallCats.map(c => outcall?.data?.[c]?.[a]?.["인입"]?.[today] || 0);
+              return `<tr>
+                <td style="text-align:left;">${a}</td>
+                <td style="color:${scheduleStatusColor(st)};font-size:11.5px;">${st || '-'}</td>
+                <td>${isOff?'-':fmtNum(inb)}</td>
+                <td>${isOff?'-':fmtNum(comp)}</td>
+                ${per.map(v=>`<td>${isOff?'-':fmtNum(v)}</td>`).join("")}
+                <td style="font-weight:700;">${isOff?'-':fmtNum(sum(per))}</td>
+              </tr>`;
+            }).join("")}
+            <tr style="font-weight:700;background:var(--panel-2);">
+              <td style="text-align:left;">팀원당 평균</td><td>-</td>
+              <td>${agents.length?(sum(agents.map(a=>sections["상담인입"]?.[a]?.[today]||0))/agents.length).toFixed(1):'-'}</td>
+              <td>${agents.length?(sum(agents.map(a=>sections["상담완료"]?.[a]?.[today]||0))/agents.length).toFixed(1):'-'}</td>
+              ${outcallCats.map(c=>`<td>${agents.length?(sum(agents.map(a=>outcall?.data?.[c]?.[a]?.["인입"]?.[today]||0))/agents.length).toFixed(1):'-'}</td>`).join("")}
+              <td>${agents.length?(sum(agents.map(a=>sum(outcallCats.map(c=>outcall?.data?.[c]?.[a]?.["인입"]?.[today]||0))))/agents.length).toFixed(1):'-'}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">아웃콜 수치는 카테고리별 <b>배정(인입) 건수</b>입니다. 통화완료 실적과 달성률은 아래 "아웃콜 목표 달성 현황"에서 확인하실 수 있습니다.</div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>요일별 목표 CS처리량 (개인당) <span class="tag">최근 4주 · Punisher 제외 · 화/수/목은 범위 목표</span></h2>
+        <table style="margin-bottom:16px;">
+          <thead><tr><th>요일</th><th>목표</th><th>방식</th><th>표본(최근 4개)</th></tr></thead>
+          <tbody>
+            ${[1,2,3,4,5,6].map(wd => {
+              const t = weekdayTargets[wd];
+              const isToday = wd === todayWd;
+              return `<tr style="${isToday?'background:var(--panel-2);':''}">
+                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
+                <td style="font-weight:700;">${weekdayTargetLabel(t)}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? (t.volatile?'범위(최소~중앙값)':'단일(중앙값)') : '-'}</td>
+                <td style="font-size:11px;color:var(--ink-dim);">${t ? t.sampleValues.join(', ') : '-'}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">오늘(${dateLabel(today)}) 목표 대비 CS 처리량 <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 목표: ${weekdayTargetLabel(todayTarget)}</span></div>
+        <table>
+          <thead><tr><th>상담원</th><th>오늘 처리량</th><th>상태</th></tr></thead>
+          <tbody>
+            ${targetComparisonToday.map(c => `<tr><td style="text-align:left;">${c.agent}</td><td>${fmtNum(c.actual)}</td>
+              <td style="color:${c.status==='ok'?'var(--good)':c.status==='low'?'var(--bad)':'var(--ink-dim)'};font-weight:600;">${c.isOff ? '휴무' : c.status==='ok' ? '✅ 목표 이상' : c.status==='low' ? '⚠️ 목표 미달 (쏠림 확인 필요)' : '-'}</td></tr>`).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          목표 = 해당 요일 최근 4회(근무일만) "팀 합계(Punisher 제외) ÷ 근무 인원"의 중앙값 · 화/수/목처럼 편차가 큰 요일은 최소~중앙값 범위로, 안정적인 요일은 중앙값 단일 기준으로 판정합니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>아웃콜 목표 달성 현황 <span class="tag">${dateLabel(today)} · 카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallCats.map(cat => buildOutcallTargetCardHTML(cat, outcallAchToday[cat], outcallRateToday[cat], "당일")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;line-height:1.6;">
+          통화량 목표는 CS 처리량과 동일한 방식(최근 4주 같은 요일 · 근무일 기준 · Punisher 제외)으로 산정합니다. 통화완료율 타겟은 카테고리 공통 ${Math.round(OUTCALL_TARGET_RATE*100)}%입니다.
+        </div>
+      </div>
+    </div>
+
+    <div class="grid1">
+      <div class="card">
+        <h2>SKU 배송물량 · 인입량 상관도 <span class="tag">요일별 · 최근 4주 평균</span></h2>
+        <div class="kpis" style="margin-bottom:16px;">
+          <div class="kpi"><div class="label">${dateLabel(today)} 배송물량(SKU)</div><div class="val">${fmtNum(skuToday)}</div>
+            <div class="delta ${skuWowDelta==null?'':(skuWowDelta>=0?'up':'down')}">${skuWowDelta!=null ? (skuWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(skuWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+            ${skuWow!=null?`<div class="delta" style="font-size:10.5px;">전주 ${fmtNum(skuWow)} → 금주 ${fmtNum(skuToday)}</div>`:''}</div>
+          <div class="kpi"><div class="label">물량-인입 상관도 (전체)</div><div class="val" style="font-size:18px;">${skuCorrAll.r!=null?skuCorrAll.r.toFixed(2):'-'}</div>
+            <div class="delta">${corrLabel(skuCorrAll.r)} · 표본 ${skuCorrAll.n}일</div></div>
+        </div>
+        <table>
+          <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 CS처리량</th><th>물량-인입 상관도</th></tr></thead>
+          <tbody>
+            ${[1,2,3,4,5,6].map(wd => {
+              const isToday = wd === todayWd;
+              const c = skuCorrByWeekday[wd];
+              return `<tr style="${isToday?'background:var(--panel-2);':''}">
+                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
+                <td>${fmtNum(skuWeekdayAvg[wd])}</td>
+                <td>${weekdayTargetLabel(weekdayTargets[wd])}</td>
+                <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          상관계수(r)는 −1~+1 사이 값으로, +1에 가까울수록 "배송물량이 많은 날 상담인입도 많다"는 관계가 강함을 뜻합니다. 상관관계는 인과관계가 아니며, 표본이 적은 요일은 참고용으로만 보시길 권합니다.
+        </div>
+      </div>
+    </div>
+
 
     <div class="grid2">
       <div class="card">
@@ -2085,7 +2120,7 @@ function renderWeekly(data){
     const met = achNames.filter(a => agentAchWeek[a].rateMin != null && agentAchWeek[a].rateMin >= 1);
     const missed = achNames.filter(a => agentAchWeek[a].rateMin != null && agentAchWeek[a].rateMin < 1)
       .sort((x,y) => agentAchWeek[x].rateMin - agentAchWeek[y].rateMin);
-    if (met.length) weeklyInsights.push(`이번 주 목표 처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
+    if (met.length) weeklyInsights.push(`이번 주 목표 CS처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
     if (missed.length){
       const w = missed[0];
       weeklyInsights.push(`목표 미달 상담원은 <b>${missed.join(", ")}</b>이며, 그중 <b>${w}</b>가 ${Math.round(agentAchWeek[w].rateMin*100)}%로 가장 낮습니다 (근무 ${agentAchWeek[w].workDays}일 기준).`);
@@ -2209,7 +2244,7 @@ function renderWeekly(data){
 
     <div class="card" style="margin-bottom:16px;">
     <div class="card" style="margin-bottom:16px;">
-      <h2>SKU 배송물량 & 요일별 목표 처리량 (주간)</h2>
+      <h2>SKU 배송물량 & 요일별 목표 CS처리량 (주간)</h2>
       <div class="kpis" style="margin-bottom:16px;">
         <div class="kpi"><div class="label">주간 배송물량 합계</div><div class="val">${fmtNum(skuWeekTotal)}</div>
           <div class="delta">${wowText(skuWeekTotal, skuWeekPrevTotal)}</div></div>
@@ -2217,7 +2252,7 @@ function renderWeekly(data){
           <div class="delta">${corrLabel(skuCorrWeek.r)} · 표본 ${skuCorrWeek.n}일</div></div>
       </div>
       <table>
-        <thead><tr><th>요일</th><th>날짜</th><th>배송물량(SKU)</th><th>목표 처리량(인당)</th><th>실제 인입</th></tr></thead>
+        <thead><tr><th>요일</th><th>날짜</th><th>배송물량(SKU)</th><th>목표 CS처리량(인당)</th><th>실제 인입</th></tr></thead>
         <tbody>
           ${week.dates.map(d => {
             const wd = weekdayOf(d);
@@ -2231,11 +2266,11 @@ function renderWeekly(data){
           }).join("")}
         </tbody>
       </table>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">목표 처리량은 최근 4주 같은 요일 기준(Punisher 제외) · 화/수/목은 변동성이 커 범위로 제시합니다.</div>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">목표 CS처리량은 최근 4주 같은 요일 기준(Punisher 제외) · 화/수/목은 변동성이 커 범위로 제시합니다.</div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>담당자별 목표 달성 현황 (주간) <span class="tag">근무 스케줄 반영 · ${dateRangeLabel(week.monday, week.saturday)}</span></h2>
+      <h2>담당자별 CS처리량 목표 달성 현황 (주간) <span class="tag">근무 스케줄 반영 · ${dateRangeLabel(week.monday, week.saturday)}</span></h2>
       ${buildAgentTargetCardHTML(agentAchWeek, "주간")}
       ${Object.keys(agentAchWeekPrev).length ? `
         <div style="font-size:13px;font-weight:600;margin:18px 0 10px;">전주 대비 달성률 변화</div>
@@ -2527,7 +2562,7 @@ function renderMonthly(data){
     const met = achNames.filter(a => agentAchMonth[a].rateMin != null && agentAchMonth[a].rateMin >= 1);
     const missed = achNames.filter(a => agentAchMonth[a].rateMin != null && agentAchMonth[a].rateMin < 1)
       .sort((x,y) => agentAchMonth[x].rateMin - agentAchMonth[y].rateMin);
-    if (met.length) monthlyInsights.push(`${month.label} 목표 처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
+    if (met.length) monthlyInsights.push(`${month.label} 목표 CS처리량을 달성한 상담원은 <b>${met.join(", ")}</b>입니다.`);
     if (missed.length){
       const w = missed[0];
       monthlyInsights.push(`목표 미달 상담원은 <b>${missed.join(", ")}</b>이며, 그중 <b>${w}</b>가 ${Math.round(agentAchMonth[w].rateMin*100)}%로 가장 낮습니다 (근무 ${agentAchMonth[w].workDays}일 기준).`);
@@ -2703,7 +2738,7 @@ function renderMonthly(data){
 
     <div class="card" style="margin-bottom:16px;">
     <div class="card" style="margin-bottom:16px;">
-      <h2>SKU 배송물량 & 요일별 목표 처리량 (월간)</h2>
+      <h2>SKU 배송물량 & 요일별 목표 CS처리량 (월간)</h2>
       <div class="kpis" style="margin-bottom:16px;">
         <div class="kpi"><div class="label">월간 배송물량 합계</div><div class="val">${fmtNum(skuMonthTotal)}</div>
           <div class="delta">${wowText(skuMonthTotal, skuMonthPrevTotal)}</div></div>
@@ -2711,7 +2746,7 @@ function renderMonthly(data){
           <div class="delta">${corrLabel(skuCorrMonth.r)} · 표본 ${skuCorrMonth.n}일</div></div>
       </div>
       <table>
-        <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 처리량(인당)</th><th>물량-인입 상관도</th></tr></thead>
+        <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 CS처리량(인당)</th><th>물량-인입 상관도</th></tr></thead>
         <tbody>
           ${[1,2,3,4,5,6].map(wd => {
             const c = skuCorrByWeekdayM[wd];
@@ -2728,7 +2763,7 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>담당자별 목표 달성 현황 (월간) <span class="tag">근무 스케줄 반영 · ${month.label}</span></h2>
+      <h2>담당자별 CS처리량 목표 달성 현황 (월간) <span class="tag">근무 스케줄 반영 · ${month.label}</span></h2>
       ${buildAgentTargetCardHTML(agentAchMonth, "월간")}
       ${Object.keys(agentAchMonthPrev).length ? `
         <div style="font-size:13px;font-weight:600;margin:18px 0 10px;">전월 대비 달성률 변화</div>
