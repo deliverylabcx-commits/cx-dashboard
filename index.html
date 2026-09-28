@@ -632,7 +632,17 @@ function parseRawLog(text){
     name: header.indexOf("name"),
     state: header.indexOf("state"),
     direction: header.indexOf("direction"),
+    tags: header.indexOf("tags"),
+    description: header.indexOf("description"),
+    summary: header.indexOf("summarizedMessage"),
   };
+  // 센터(허브) 컬럼은 위치가 아닌 "헤더 이름"으로 찾는다 - 시트에서 어느 열에 넣어도 동작
+  const CENTER_HEADER_CANDIDATES = ["profile.centerName","centerName","센터","센터명","담당허브","허브","center"];
+  idx.center = -1;
+  for (const cand of CENTER_HEADER_CANDIDATES){
+    const found = header.findIndex(h => (h||"").trim().toLowerCase() === cand.toLowerCase());
+    if (found >= 0){ idx.center = found; break; }
+  }
   const URL_COL_INDEX = 97; // 98번째 컬럼(1-indexed) = 채널톡 URL
   const createdAtRe = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/;
   const out = [];
@@ -649,7 +659,11 @@ function parseRawLog(text){
       store: idx.name>=0 ? (row[idx.name] || "").trim() : "",
       state: idx.state>=0 ? (row[idx.state] || "").trim() : "",
       direction: idx.direction>=0 ? (row[idx.direction] || "").trim() : "",
+      tags: idx.tags>=0 ? (row[idx.tags] || "").trim() : "",
+      desc: ((idx.description>=0 ? (row[idx.description]||"") : "") + " " + (idx.summary>=0 ? (row[idx.summary]||"") : "")).trim(),
+      center: idx.center>=0 ? (row[idx.center] || "").trim() : "",
       url: (row[URL_COL_INDEX] || "").trim(),
+      month: parseInt(m[2]),
     });
   }
   return out;
@@ -1053,6 +1067,85 @@ function skuInboundCorrelation(dateArr, skuRow, inboundOf){
   return { r: pearson(xs, ys), n: xs.length };
 }
 // 요일별 SKU 평균 (최근 N개 같은 요일)
+// ===== 품질불량 / 배송클레임 심층 분석 (RAW tags + 상담내용 기반) =====
+// tags 형식 예: "공급사/공급사명/(허브)이삭, 공급사/품질불량/반품"
+function parseTagList(tagStr){
+  return (tagStr||"").split(",").map(s => s.trim()).filter(Boolean);
+}
+function tagValue(tagStr, prefix){
+  const hit = parseTagList(tagStr).find(t => t.startsWith(prefix));
+  return hit ? hit.slice(prefix.length).trim() : null;
+}
+// 공급사명에서 소싱 구분 접두사((허브)/(대구) 등)를 떼어 정규화
+function normalizeSupplier(nameRaw){
+  if (!nameRaw) return null;
+  return nameRaw.replace(/^\([^)]*\)\s*/, "").trim() || nameRaw.trim();
+}
+// 상담 설명에서 상품 대분류 판정 (엑셀 분석과 동일한 키워드 방식)
+const PRODUCT_CATEGORY_KEYWORDS = {
+  "농산": ["채소","야채","상추","로메인","적근대","치커리","깻잎","대파","양파","배추","당근","고추","오이","호박","단호박","버섯","감자","고구마","토마토","사과","수박","참외","과일","쌈","나물","시금치","부추","마늘","생강","브로콜리","파프리카","가지","콩나물","숙주","양배추","알배추","청경채","깐마늘","새송이","팽이"],
+  "축산": ["계란","달걀","돼지","소고기","닭","육류","삼겹","목살","한우","우육","돈육","계육","베이컨","햄"],
+  "수산": ["오징어","생선","새우","문어","조개","해산물","고등어","연어","낙지","멸치","미역","다시마","수산","해동"],
+  "가공": ["두부","면","소스","장류","통조림","가공","빵","떡","만두","치즈","우유","유제품","음료","튀김가루","밀가루","설탕","식용유"],
+};
+function classifyProductCategory(text){
+  if (!text) return "기타";
+  for (const [cat, kws] of Object.entries(PRODUCT_CATEGORY_KEYWORDS)){
+    if (kws.some(k => text.includes(k))) return cat;
+  }
+  return "기타";
+}
+// 배송/품질 이슈 키워드 (센터별·유형별 집계용)
+const ISSUE_KEYWORDS = ["파손","해동","냉해","분실","누락","오배송","변질","부패","신선도","지연","미입고","부분입고","곰팡이","중량"];
+function detectIssueKeywords(text, tagStr){
+  const hay = `${text||""} ${tagStr||""}`;
+  return ISSUE_KEYWORDS.filter(k => hay.includes(k));
+}
+// 기간 내 품질불량 건 분석: 공급사별 / 상품대분류별 / 처리유형별
+function analyzeQualityIssues(rawLog, dateSet){
+  const rows = (rawLog||[]).filter(r => {
+    if (dateSet && !dateSet.has(r.date)) return false;
+    return /품질불량/.test(r.tags||"");
+  });
+  const bySupplier = {}, byCategory = {}, byType = {};
+  rows.forEach(r => {
+    const supplier = normalizeSupplier(tagValue(r.tags, "공급사/공급사명/")) || "미기재";
+    const type = tagValue(r.tags, "공급사/품질불량/") || "미분류";
+    const cat = classifyProductCategory(r.desc);
+    bySupplier[supplier] = bySupplier[supplier] || { total:0, types:{} };
+    bySupplier[supplier].total++;
+    bySupplier[supplier].types[type] = (bySupplier[supplier].types[type]||0)+1;
+    byCategory[cat] = byCategory[cat] || { total:0, suppliers:{}, types:{} };
+    byCategory[cat].total++;
+    byCategory[cat].suppliers[supplier] = (byCategory[cat].suppliers[supplier]||0)+1;
+    byCategory[cat].types[type] = (byCategory[cat].types[type]||0)+1;
+    byType[type] = (byType[type]||0)+1;
+  });
+  return { total: rows.length, bySupplier, byCategory, byType };
+}
+// 기간 내 배송/품질 이슈를 키워드별로 집계 (센터 정보가 있으면 센터별로도)
+function analyzeIssueKeywords(rawLog, dateSet, centerOf){
+  const rows = (rawLog||[]).filter(r => (!dateSet || dateSet.has(r.date)) && (/품질불량|공급사클레임|배송/.test(r.tags||"")));
+  const byKeyword = {};
+  const byCenter = {};
+  let centerKnown = 0;
+  rows.forEach(r => {
+    const kws = detectIssueKeywords(r.desc, r.tags);
+    if (!kws.length) return;
+    const center = centerOf ? centerOf(r) : null;
+    if (center) centerKnown++;
+    kws.forEach(k => {
+      byKeyword[k] = (byKeyword[k]||0)+1;
+      if (center){
+        byCenter[center] = byCenter[center] || { total:0, kw:{} };
+        byCenter[center].total++;
+        byCenter[center].kw[k] = (byCenter[center].kw[k]||0)+1;
+      }
+    });
+  });
+  return { byKeyword, byCenter, centerKnown, rows: rows.length };
+}
+
 function skuByWeekday(dates, skuRow, windowN){
   const byWd = Array.from({length:7}, () => []);
   (dates||[]).forEach(d => {
@@ -2525,6 +2618,19 @@ function renderMonthly(data){
   const inboundOfDateM = (d) => totalInboundOn(d, data.totalRow, sections, agents, depMapM);
   const skuCorrMonth = skuInboundCorrelation(month.dates, skuRow, inboundOfDateM);
   const skuWeekdayAvgM = skuByWeekday(month.dates, skuRow, 5);
+  // 품질불량 심층 분석 (월간) + 전월 비교
+  const monthDateSet = new Set(month.dates);
+  const qualityMonth = analyzeQualityIssues(rawLog, monthDateSet);
+  const qualityPrev = prevMonth ? analyzeQualityIssues(rawLog, new Set(prevMonth.dates)) : null;
+  const centerOf = (r) => (r.center && r.center.trim()) ? r.center.trim() : null;
+  const issueKwMonth = analyzeIssueKeywords(rawLog, monthDateSet, centerOf);
+  const issueKwPrev = prevMonth ? analyzeIssueKeywords(rawLog, new Set(prevMonth.dates), centerOf) : null;
+  const centerRows = Object.entries(issueKwMonth.byCenter).sort((a,b)=>b[1].total-a[1].total);
+  const centerKwCols = kwTop => kwTop;
+  const qSuppliers = Object.entries(qualityMonth.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,10);
+  const qCategories = Object.entries(qualityMonth.byCategory).sort((a,b)=>b[1].total-a[1].total);
+  const qTypes = Object.entries(qualityMonth.byType).sort((a,b)=>b[1]-a[1]);
+  const kwSorted = Object.entries(issueKwMonth.byKeyword).sort((a,b)=>b[1]-a[1]);
   // 아웃콜 카테고리별 담당자 목표 달성 (월간)
   const outcallCatsM = outcall?.categories || [];
   const outcallAchMonth = {};
@@ -2726,6 +2832,96 @@ function renderMonthly(data){
         </tbody>
       </table>
       <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">도입 전(~${LETTERING_START} 이전) vs 도입 후(${LETTERING_START} 이후) 전체 기간 아웃콜 통화완료율 비교입니다.</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+    <div class="card" style="margin-bottom:16px;">
+      <h2>품질불량 심층 분석 (월간) <span class="tag">RAW 태그 기준 · ${fmtNum(qualityMonth.total)}건${qualityPrev?` · 전월 ${fmtNum(qualityPrev.total)}건`:''}</span></h2>
+
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;">상품 대분류별</div>
+      <table style="margin-bottom:18px;">
+        <thead><tr><th>순위</th><th>대분류</th><th>건수</th><th>비중</th><th>주요 공급사 (TOP3)</th><th>주요 처리유형</th></tr></thead>
+        <tbody>
+          ${qCategories.map(([cat,v],i) => {
+            const top3 = Object.entries(v.suppliers).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,n])=>`${s} ${n}`).join(' · ');
+            const topT = Object.entries(v.types).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([t,n])=>`${t} ${n}`).join(' · ');
+            return `<tr><td>${i+1}</td><td style="text-align:left;font-weight:600;">${cat}</td>
+              <td>${fmtNum(v.total)}</td><td>${qualityMonth.total?Math.round(v.total/qualityMonth.total*100):0}%</td>
+              <td style="text-align:left;font-size:11.5px;">${top3||'-'}</td>
+              <td style="text-align:left;font-size:11.5px;color:var(--ink-dim);">${topT||'-'}</td></tr>`;
+          }).join("") || '<tr><td colspan="6" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;">공급사별 (TOP 10)</div>
+      <table style="margin-bottom:18px;">
+        <thead><tr><th>순위</th><th>공급사</th><th>건수</th><th>비중</th><th>처리유형 분포</th><th>전월 대비</th></tr></thead>
+        <tbody>
+          ${qSuppliers.map(([s,v],i) => {
+            const prev = qualityPrev?.bySupplier?.[s]?.total;
+            const diff = prev!=null ? v.total-prev : null;
+            const types = Object.entries(v.types).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`${t} ${n}`).join(' · ');
+            return `<tr><td>${i+1}</td><td style="text-align:left;font-weight:600;">${s}</td>
+              <td>${fmtNum(v.total)}</td><td>${qualityMonth.total?Math.round(v.total/qualityMonth.total*100):0}%</td>
+              <td style="text-align:left;font-size:11.5px;color:var(--ink-dim);">${types}</td>
+              <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
+          }).join("") || '<tr><td colspan="6" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;">처리유형별</div>
+      <div class="kpis">
+        ${qTypes.map(([t,n]) => `<div class="kpi"><div class="label">${t}</div><div class="val">${fmtNum(n)}</div>
+          <div class="delta">${qualityMonth.total?Math.round(n/qualityMonth.total*100):0}%</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
+      </div>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+        공급사·처리유형은 RAW <b>tags</b>에서 추출하고(공급사명 앞 소싱 구분 접두사는 제거), 상품 대분류는 상담 설명의 상품 키워드로 판정합니다. 키워드에 해당하지 않는 건은 "기타"로 분류됩니다.
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>배송·품질 이슈 유형별 (월간) <span class="tag">파손 · 해동 · 냉해 · 분실 등 키워드 기준</span></h2>
+      <table>
+        <thead><tr><th>이슈 유형</th><th>건수</th><th>비중</th><th>전월 대비</th></tr></thead>
+        <tbody>
+          ${kwSorted.map(([k,n]) => {
+            const totalKw = sum(kwSorted.map(x=>x[1]));
+            const prev = issueKwPrev?.byKeyword?.[k];
+            const diff = prev!=null ? n-prev : null;
+            return `<tr><td style="text-align:left;font-weight:600;">${k}</td><td>${fmtNum(n)}</td>
+              <td>${totalKw?Math.round(n/totalKw*100):0}%</td>
+              <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
+          }).join("") || '<tr><td colspan="4" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>센터(허브)별 이슈 현황 (월간) <span class="tag">${centerRows.length ? `${centerRows.length}개 센터 · 센터 확인 ${fmtNum(issueKwMonth.centerKnown)}건` : '센터 컬럼 미확인'}</span></h2>
+      ${centerRows.length ? `
+        <table>
+          <thead><tr><th>순위</th><th>센터(허브)</th>${kwSorted.slice(0,6).map(([k])=>`<th>${k}</th>`).join("")}<th>합계</th><th>비중</th></tr></thead>
+          <tbody>
+            ${(() => {
+              const grand = sum(centerRows.map(([,v])=>v.total));
+              return centerRows.map(([name,v],i) => `<tr>
+                <td>${i+1}</td><td style="text-align:left;font-weight:600;">${name}</td>
+                ${kwSorted.slice(0,6).map(([k])=>`<td>${v.kw[k]?fmtNum(v.kw[k]):'-'}</td>`).join("")}
+                <td style="font-weight:700;">${fmtNum(v.total)}</td>
+                <td>${grand?Math.round(v.total/grand*100):0}%</td>
+              </tr>`).join("");
+            })()}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
+          센터는 RAW의 센터 컬럼(profile.centerName / centerName / 담당허브 등 헤더명으로 자동 인식)에서 읽어옵니다. 컬럼 값이 비어 있는 건(전화 상담 등 업장 미등록)은 집계에서 제외됩니다.
+        </div>
+      ` : `
+        <div style="font-size:12px;color:var(--accent);line-height:1.7;background:var(--panel-2);border-radius:8px;padding:12px;">
+          <b>센터 컬럼을 찾지 못했습니다.</b> RAW 시트에 추가하신 컬럼의 <b>헤더(3행) 이름</b>을 아래 중 하나로 맞춰 주세요 — 위치(열)는 어디든 상관없습니다.<br>
+          <b>profile.centerName</b> · centerName · 센터 · 센터명 · 담당허브 · 허브 · center
+        </div>
+      `}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
