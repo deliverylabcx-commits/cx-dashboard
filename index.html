@@ -96,7 +96,9 @@ const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_al
 const DELAYHOLD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=634573420&single=true&output=csv";
 const RAWLOG_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=0&single=true&output=csv";
 const ONBOARD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1671449001&single=true&output=csv";
-const CALL_SUCCESS_RESULTS = ["콜완료"]; // 통화 성공으로 집계할 Call_result 값
+const CALL_SUCCESS_RESULTS = ["콜완료"];
+// 신규 온보딩 VOC 서베이 (구글 폼 응답). 아래 URL은 해당 시트를 "웹에 게시(CSV)" 한 주소로 교체해야 동작합니다.
+const SURVEY_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRe95hvtY4zItohZNS7zsc_fqwKREl9ZvPzXWDTZc6BKKLcAgxc7vPodko6gReftJcKQ0vJfm2QC9lG/pub?output=csv"; // 통화 성공으로 집계할 Call_result 값
 // 화면 표시용 카테고리 명칭 (데이터 키는 시트 원본 그대로 유지)
 const CATEGORY_LABELS = { "5발주": "3~5발주" };
 function catLabel(c){ return CATEGORY_LABELS[c] || c; }
@@ -699,7 +701,13 @@ async function loadMainData(){
   try { onboardCalls = parseOnboardCalls(await fetchCSV(ONBOARD_CSV_URL)); }
   catch(e){ console.warn("신규 온보딩_Out Call 시트를 불러오지 못했습니다:", e.message); }
 
-  return { ...parseCSV(csText), schedule, outcall, delay30, delayHold, onboardCalls };
+  let survey = [];
+  if (SURVEY_CSV_URL){
+    try { survey = parseSurvey(await fetchCSV(SURVEY_CSV_URL)); }
+    catch(e){ console.warn("온보딩 VOC 서베이 시트를 불러오지 못했습니다:", e.message); }
+  }
+
+  return { ...parseCSV(csText), schedule, outcall, delay30, delayHold, onboardCalls, survey };
 }
 
 async function loadRawLog(){
@@ -1159,6 +1167,202 @@ function analyzeIssueKeywords(rawLog, dateSet, centerOf, kwSet){
     });
   });
   return { byKeyword, byCenter, centerKnown, rows: rows.length };
+}
+
+// ===== 공용 카드 빌더: 품질/센터/VOC (주간·월간 공용) =====
+function buildQualityCardHTML(q, qPrev, periodLabel){
+  const sup = Object.entries(q.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,10);
+  const cats = Object.entries(q.byCategory).sort((a,b)=>b[1].total-a[1].total);
+  const types = Object.entries(q.byType).sort((a,b)=>b[1]-a[1]);
+  return `
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">상품 대분류별</div>
+    <table style="margin-bottom:18px;">
+      <thead><tr><th>순위</th><th>대분류</th><th>건수</th><th>비중</th><th>주요 공급사 (TOP3)</th></tr></thead>
+      <tbody>
+        ${cats.map(([cat,v],i)=>{
+          const t3 = Object.entries(v.suppliers).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,n])=>`${s} ${n}`).join(' · ');
+          return `<tr><td>${i+1}</td><td style="text-align:left;font-weight:600;">${cat}</td><td>${fmtNum(v.total)}</td>
+            <td>${q.total?Math.round(v.total/q.total*100):0}%</td>
+            <td style="text-align:left;font-size:11.5px;">${t3||'-'}</td></tr>`;
+        }).join("") || '<tr><td colspan="5" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+      </tbody>
+    </table>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">공급사별 (TOP 10)</div>
+    <table style="margin-bottom:18px;">
+      <thead><tr><th>순위</th><th>공급사</th><th>건수</th><th>비중</th><th>처리유형</th><th>${periodLabel} 대비</th></tr></thead>
+      <tbody>
+        ${sup.map(([s,v],i)=>{
+          const prev = qPrev?.bySupplier?.[s]?.total;
+          const diff = prev!=null ? v.total-prev : null;
+          const tp = Object.entries(v.types).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`${t} ${n}`).join(' · ');
+          return `<tr><td>${i+1}</td><td style="text-align:left;font-weight:600;">${s}</td><td>${fmtNum(v.total)}</td>
+            <td>${q.total?Math.round(v.total/q.total*100):0}%</td>
+            <td style="text-align:left;font-size:11.5px;color:var(--ink-dim);">${tp}</td>
+            <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
+        }).join("") || '<tr><td colspan="6" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+      </tbody>
+    </table>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">처리유형별</div>
+    <div class="kpis">
+      ${types.map(([t,n])=>`<div class="kpi"><div class="label">${t}</div><div class="val">${fmtNum(n)}</div>
+        <div class="delta">${q.total?Math.round(n/q.total*100):0}%</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
+    </div>
+  `;
+}
+function buildCenterCardHTML(issueKw, kwSorted){
+  const centerRows = Object.entries(issueKw.byCenter).sort((a,b)=>b[1].total-a[1].total);
+  if (!centerRows.length) return `
+    <div style="font-size:12px;color:var(--accent);line-height:1.7;background:var(--panel-2);border-radius:8px;padding:12px;">
+      <b>센터 컬럼을 찾지 못했습니다.</b> RAW 시트 헤더를 <b>profile.centerName</b> · centerName · 센터 · 담당허브 중 하나로 맞춰 주세요 (열 위치는 무관).
+    </div>`;
+  const grand = sum(centerRows.map(([,v])=>v.total));
+  const cols = kwSorted.slice(0,6);
+  return `
+    <table>
+      <thead><tr><th>순위</th><th>센터(허브)</th>${cols.map(([k])=>`<th>${k}</th>`).join("")}<th>합계</th><th>비중</th></tr></thead>
+      <tbody>
+        ${centerRows.map(([name,v],i)=>`<tr>
+          <td>${i+1}</td><td style="text-align:left;font-weight:600;">${name}</td>
+          ${cols.map(([k])=>`<td>${v.kw[k]?fmtNum(v.kw[k]):'-'}</td>`).join("")}
+          <td style="font-weight:700;">${fmtNum(v.total)}</td>
+          <td>${grand?Math.round(v.total/grand*100):0}%</td></tr>`).join("")}
+      </tbody>
+    </table>
+    <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">센터(허브)는 배송 담당이므로 배송 귀책 이슈만 집계합니다. 중량·미입고 등 공급사 귀책은 제외됩니다.</div>
+  `;
+}
+function buildSurveyCardHTML(s, sPrev, periodLabel){
+  if (!s || !s.total) return '<div style="color:var(--ink-dim);font-size:13px;">해당 기간 서베이 응답이 없습니다.</div>';
+  const goodTop = Object.entries(s.good).sort((a,b)=>b[1]-a[1]);
+  const badTop = Object.entries(s.bad).sort((a,b)=>b[1]-a[1]);
+  const scoreColor = s.avgScore>=4 ? 'var(--good)' : s.avgScore>=3 ? 'var(--accent)' : 'var(--bad)';
+  const avgDiff = (sPrev && sPrev.avgScore!=null && s.avgScore!=null) ? s.avgScore-sPrev.avgScore : null;
+  return `
+    <div class="kpis" style="margin-bottom:16px;">
+      <div class="kpi"><div class="label">응답 수</div><div class="val">${fmtNum(s.total)}</div>
+        ${sPrev?`<div class="delta">${periodLabel} ${fmtNum(sPrev.total)}건</div>`:''}</div>
+      <div class="kpi"><div class="label">평균 재구매 의향 (5점)</div><div class="val" style="color:${scoreColor};">${s.avgScore!=null?s.avgScore.toFixed(2):'-'}</div>
+        <div class="delta" style="color:${avgDiff==null?'var(--ink-dim)':(avgDiff>=0?'var(--good)':'var(--bad)')};">${avgDiff!=null?(avgDiff>=0?'▲ ':'▼ ')+Math.abs(avgDiff).toFixed(2)+'점':'비교 데이터 없음'}</div></div>
+      <div class="kpi"><div class="label">추천 (4~5점)</div><div class="val" style="color:var(--good);">${fmtNum(s.promoters)}</div>
+        <div class="delta">${s.total?Math.round(s.promoters/s.total*100):0}%</div></div>
+      <div class="kpi"><div class="label">비추천 (1~2점)</div><div class="val" style="color:var(--bad);">${fmtNum(s.detractors)}</div>
+        <div class="delta">${s.total?Math.round(s.detractors/s.total*100):0}%</div></div>
+      <div class="kpi" style="background:var(--panel-2);"><div class="label">NPS 지수</div><div class="val" style="color:var(--accent);">${s.nps!=null?Math.round(s.nps):'-'}</div>
+        <div class="delta">추천 − 비추천 비율</div></div>
+    </div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:260px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--good);">만족 요인</div>
+        <table><thead><tr><th>항목</th><th>건수</th><th>비중</th></tr></thead><tbody>
+          ${goodTop.map(([k,n])=>`<tr><td style="text-align:left;">${k}</td><td>${n}</td><td>${s.total?Math.round(n/s.total*100):0}%</td></tr>`).join("") || '<tr><td colspan="3" style="color:var(--ink-dim);">없음</td></tr>'}
+        </tbody></table>
+      </div>
+      <div style="flex:1;min-width:260px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--bad);">개선 필요 항목</div>
+        <table><thead><tr><th>항목</th><th>건수</th><th>비중</th></tr></thead><tbody>
+          ${badTop.map(([k,n])=>`<tr><td style="text-align:left;">${k}</td><td>${n}</td><td>${s.total?Math.round(n/s.total*100):0}%</td></tr>`).join("") || '<tr><td colspan="3" style="color:var(--ink-dim);">없음</td></tr>'}
+        </tbody></table>
+      </div>
+    </div>
+    ${s.frees.length ? `
+      <div style="font-size:13px;font-weight:600;margin:18px 0 8px;">주관식 VOC <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 낮은 점수 순</span></div>
+      <table style="font-size:12px;">
+        <thead><tr><th>점수</th><th>매장</th><th>내용</th></tr></thead>
+        <tbody>
+          ${s.frees.slice().sort((a,b)=>(a.score??9)-(b.score??9)).slice(0,12).map(f=>`<tr>
+            <td style="font-weight:700;color:${f.score<=2?'var(--bad)':f.score>=4?'var(--good)':'var(--accent)'};">${f.score??'-'}</td>
+            <td style="text-align:left;">${f.store||'-'}</td>
+            <td style="text-align:left;">${f.text}</td></tr>`).join("")}
+        </tbody>
+      </table>` : ''}
+  `;
+}
+
+// ===== 신규 온보딩 VOC 서베이 파싱/집계 =====
+function parseSurvey(text){
+  const parsed = Papa.parse(text.trim(), { skipEmptyLines: true });
+  const rows = parsed.data;
+  const hIdx = rows.findIndex(r => (r||[]).some(cell => (cell||"").includes("타임스탬프")));
+  if (hIdx < 0) return [];
+  const header = rows[hIdx].map(h => (h||"").trim());
+  const find = (kw) => header.findIndex(h => h.includes(kw));
+  const idx = {
+    ts: 0,
+    store: find("매장명"),
+    good: find("만족"),
+    bad: find("개선이 필요"),
+    other: find("다른 식자재"),
+    score: find("재구매"),
+    free: header.length-1,
+  };
+  // 자유응답은 "자유롭게" 문구가 든 컬럼 우선
+  const freeIdx = header.findIndex(h => h.includes("자유롭게"));
+  if (freeIdx >= 0) idx.free = freeIdx;
+  const out = [];
+  for (let r = hIdx+1; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || !row[idx.ts]) continue;
+    const d = parseKoreanDateTime(row[idx.ts]);
+    if (!d) continue;
+    const scoreRaw = idx.score>=0 ? (row[idx.score]||"").trim() : "";
+    const score = scoreRaw ? parseInt(scoreRaw) : null;
+    out.push({
+      date: `${d.getMonth()+1}/${d.getDate()}`,
+      store: idx.store>=0 ? (row[idx.store]||"").trim() : "",
+      good: idx.good>=0 ? (row[idx.good]||"").trim() : "",
+      bad: idx.bad>=0 ? (row[idx.bad]||"").trim() : "",
+      other: idx.other>=0 ? (row[idx.other]||"").trim() : "",
+      score: (score!=null && !isNaN(score)) ? score : null,
+      free: (row[idx.free]||"").trim(),
+    });
+  }
+  return out;
+}
+function parseKoreanDateTime(v){
+  v = (v||"").trim();
+  if (!v) return null;
+  const dm = v.match(/(\d{4})[-.\/]\s*(\d{1,2})[-.\/]\s*(\d{1,2})/);
+  if (!dm) return null;
+  let hh=0, mm=0;
+  const rest = v.slice(dm.index + dm[0].length);
+  const tm = rest.match(/(오전|오후)?\s*(\d{1,2}):(\d{2})/);
+  if (tm){
+    hh = +tm[2]; mm = +tm[3];
+    if (tm[1]==="오후" && hh<12) hh+=12;
+    if (tm[1]==="오전" && hh===12) hh=0;
+  }
+  return new Date(+dm[1], +dm[2]-1, +dm[3], hh, mm);
+}
+// 복수선택 응답을 항목별로 분해 (쉼표 구분, 자유기술은 원문 유지)
+const SURVEY_KNOWN_GOOD = ["합리적인 가격","간편한 주문 절차","상품 품질 / 신선도","다양한 상품 구성 / 재고 보유","빠른 배송 속도","친절하고 신속한 CS 응대"];
+const SURVEY_KNOWN_BAD = ["배송 시간 또는 일정이 불편함","상품 정보 / 설명 부족","원하는 상품의 재고 부족","상품 품질 이슈","특별히 없음"];
+function splitSurveyChoices(v, known){
+  if (!v) return [];
+  const hits = known.filter(k => v.includes(k));
+  if (hits.length) return hits;
+  return [v.length > 24 ? "기타(자유기술)" : v]; // 선택지에 없는 직접 입력은 묶어서 처리
+}
+function analyzeSurvey(surveyRows, dateSet){
+  const rows = (surveyRows||[]).filter(r => !dateSet || dateSet.has(r.date));
+  const good = {}, bad = {}, other = {}, scoreDist = {1:0,2:0,3:0,4:0,5:0};
+  let scoreSum = 0, scoreN = 0;
+  const frees = [];
+  rows.forEach(r => {
+    splitSurveyChoices(r.good, SURVEY_KNOWN_GOOD).forEach(k => good[k]=(good[k]||0)+1);
+    splitSurveyChoices(r.bad, SURVEY_KNOWN_BAD).forEach(k => bad[k]=(bad[k]||0)+1);
+    if (r.other) other[r.other] = (other[r.other]||0)+1;
+    if (r.score!=null && scoreDist[r.score]!=null){ scoreDist[r.score]++; scoreSum+=r.score; scoreN++; }
+    if (r.free && r.free.length>3) frees.push({ store:r.store, score:r.score, text:r.free, date:r.date });
+  });
+  const promoters = scoreDist[5]+scoreDist[4];
+  const detractors = scoreDist[1]+scoreDist[2];
+  return {
+    total: rows.length, good, bad, other, scoreDist,
+    avgScore: scoreN ? scoreSum/scoreN : null,
+    promoters, detractors, passives: scoreDist[3],
+    nps: scoreN ? ((promoters-detractors)/scoreN)*100 : null,
+    frees
+  };
 }
 
 function skuByWeekday(dates, skuRow, windowN){
@@ -2066,7 +2270,7 @@ function destroyCharts(){
 
 /* ===================== 주간 리포트 ===================== */
 function renderWeekly(data){
-  const { dates, sections, outcall, delay30, schedule, rawLog, onboardCalls, skuRow } = data;
+  const { dates, sections, outcall, delay30, schedule, rawLog, onboardCalls, skuRow, survey } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const weeks = buildWeekList(dates);
   const app = document.getElementById("app");
@@ -2149,6 +2353,16 @@ function renderWeekly(data){
   }
   const absentWeek = absentWeekStats(week);
   const absentWeekPrev = absentWeekStats(prevWeek);
+
+  // 품질/센터/VOC 주간 집계 (월간과 동일 로직 재사용)
+  const weekDateSetQ = new Set(week.dates);
+  const centerOfW = (r) => (r.center && r.center.trim()) ? r.center.trim() : null;
+  const qualityWeek = analyzeQualityIssues(rawLog, weekDateSetQ);
+  const qualityWeekPrev = prevWeek ? analyzeQualityIssues(rawLog, new Set(prevWeek.dates)) : null;
+  const issueKwWeek = analyzeIssueKeywords(rawLog, weekDateSetQ, centerOfW, DELIVERY_ISSUE_KEYWORDS);
+  const kwSortedW = Object.entries(issueKwWeek.byKeyword).sort((a,b)=>b[1]-a[1]);
+  const surveyWeek = analyzeSurvey(survey, weekDateSetQ);
+  const surveyWeekPrev = prevWeek ? analyzeSurvey(survey, new Set(prevWeek.dates)) : null;
 
   // SKU 배송물량 주간 집계 + 요일별 목표 처리량
   const skuWeekTotal = sum(week.dates.map(d => skuRow?.[d] || 0));
@@ -2404,6 +2618,24 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+      <h2>품질불량 심층 분석 (주간) <span class="tag">${fmtNum(qualityWeek.total)}건${qualityWeekPrev?` · 전주 ${fmtNum(qualityWeekPrev.total)}건`:''}</span></h2>
+      <canvas id="chartQualitySupplierW" style="max-height:230px;margin-bottom:18px;"></canvas>
+      ${buildQualityCardHTML(qualityWeek, qualityWeekPrev, "전주")}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>센터(허브)별 배송 이슈 (주간) <span class="tag">배송 귀책 · 센터 확인 ${fmtNum(issueKwWeek.centerKnown)}건</span></h2>
+      <canvas id="chartCenterW" style="max-height:230px;margin-bottom:18px;"></canvas>
+      ${buildCenterCardHTML(issueKwWeek, kwSortedW)}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h2>신규 온보딩 VOC 서베이 (주간) <span class="tag">${dateRangeLabel(week.monday, week.saturday)}</span></h2>
+      ${surveyWeek.total ? `<canvas id="chartSurveyW" style="max-height:220px;margin-bottom:18px;"></canvas>` : ''}
+      ${buildSurveyCardHTML(surveyWeek, surveyWeekPrev, "전주")}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>부재 현황 (주간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
       <div class="kpis">
         <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentWeek.total)}</div>
@@ -2493,6 +2725,13 @@ function renderWeekly(data){
   `;
 
   destroyCharts();
+  {
+    const supTop = Object.entries(qualityWeek.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,8);
+    charts.qSupW = drawBarChart("chartQualitySupplierW", supTop.map(([s])=>s), supTop.map(([,v])=>v.total), "#E8A33DAA", true);
+    const cRows = Object.entries(issueKwWeek.byCenter).sort((a,b)=>b[1].total-a[1].total).slice(0,10);
+    charts.centerW = drawBarChart("chartCenterW", cRows.map(([n])=>n), cRows.map(([,v])=>v.total), "#4C6EF5AA", true);
+    if (surveyWeek.total) charts.surveyW = drawStackedScoreChart("chartSurveyW", surveyWeek.scoreDist);
+  }
   const weekDailyCanvas = document.getElementById("chartWeekDaily");
   if (weekDailyCanvas){
     const perDay = week.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapW));
@@ -2509,7 +2748,7 @@ function renderWeekly(data){
 
 /* ===================== 월별 리포트 ===================== */
 function renderMonthly(data){
-  const { dates, sections, outcall, delay30, onboardCalls, rawLog, skuRow, schedule } = data;
+  const { dates, sections, outcall, delay30, onboardCalls, rawLog, skuRow, schedule, survey } = data;
   const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
   const months = buildMonthList(dates);
   const app = document.getElementById("app");
@@ -2645,6 +2884,8 @@ function renderMonthly(data){
   const qualKwMonth = analyzeIssueKeywords(rawLog, monthDateSet, null, QUALITY_ISSUE_KEYWORDS);
   const qualKwPrev = prevMonth ? analyzeIssueKeywords(rawLog, new Set(prevMonth.dates), null, QUALITY_ISSUE_KEYWORDS) : null;
   const qualKwSorted = Object.entries(qualKwMonth.byKeyword).sort((a,b)=>b[1]-a[1]);
+  const surveyMonth = analyzeSurvey(survey, monthDateSet);
+  const surveyMonthPrev = prevMonth ? analyzeSurvey(survey, new Set(prevMonth.dates)) : null;
   const centerRows = Object.entries(issueKwMonth.byCenter).sort((a,b)=>b[1].total-a[1].total);
   const centerKwCols = kwTop => kwTop;
   const qSuppliers = Object.entries(qualityMonth.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,10);
@@ -2857,6 +3098,7 @@ function renderMonthly(data){
     <div class="card" style="margin-bottom:16px;">
     <div class="card" style="margin-bottom:16px;">
       <h2>품질불량 심층 분석 (월간) <span class="tag">RAW 태그 기준 · ${fmtNum(qualityMonth.total)}건${qualityPrev?` · 전월 ${fmtNum(qualityPrev.total)}건`:''}</span></h2>
+      <canvas id="chartQualitySupplierM" style="max-height:230px;margin-bottom:18px;"></canvas>
 
       <div style="font-size:13px;font-weight:600;margin-bottom:8px;">상품 대분류별</div>
       <table style="margin-bottom:18px;">
@@ -2944,6 +3186,7 @@ function renderMonthly(data){
     <div class="card" style="margin-bottom:16px;">
       <h2>센터(허브)별 이슈 현황 (월간) <span class="tag">${centerRows.length ? `${centerRows.length}개 센터 · 센터 확인 ${fmtNum(issueKwMonth.centerKnown)}건` : '센터 컬럼 미확인'}</span></h2>
       ${centerRows.length ? `
+        <canvas id="chartCenterM" style="max-height:230px;margin-bottom:18px;"></canvas>
         <table>
           <thead><tr><th>순위</th><th>센터(허브)</th>${kwSorted.slice(0,6).map(([k])=>`<th>${k}</th>`).join("")}<th>합계</th><th>비중</th></tr></thead>
           <tbody>
@@ -3030,6 +3273,12 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
+      <h2>신규 온보딩 VOC 서베이 (월간) <span class="tag">${month.label}</span></h2>
+      ${surveyMonth.total ? `<canvas id="chartSurveyM" style="max-height:220px;margin-bottom:18px;"></canvas>` : ''}
+      ${buildSurveyCardHTML(surveyMonth, surveyMonthPrev, "전월")}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
       <h2>부재 현황 (월간) <span class="tag">목표 미설정 · 참고 지표</span></h2>
       <div class="kpis">
         <div class="kpi"><div class="label">부재건수</div><div class="val">${fmtNum(absentMonth.total)}</div>
@@ -3079,6 +3328,13 @@ function renderMonthly(data){
   `;
 
   destroyCharts();
+  {
+    const supTopM = Object.entries(qualityMonth.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,8);
+    charts.qSupM = drawBarChart("chartQualitySupplierM", supTopM.map(([s])=>s), supTopM.map(([,v])=>v.total), "#E8A33DAA", true);
+    const cRowsM = Object.entries(issueKwMonth.byCenter).sort((a,b)=>b[1].total-a[1].total).slice(0,12);
+    charts.centerM = drawBarChart("chartCenterM", cRowsM.map(([n])=>n), cRowsM.map(([,v])=>v.total), "#4C6EF5AA", true);
+    if (surveyMonth.total) charts.surveyM = drawStackedScoreChart("chartSurveyM", surveyMonth.scoreDist);
+  }
   const monthDailyCanvas = document.getElementById("chartMonthDaily");
   if (monthDailyCanvas){
     const perDay = month.dates.map(d => totalInboundOn(d, data.totalRow, sections, agents, depMapM));
@@ -3092,6 +3348,37 @@ function renderMonthly(data){
       options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}}, x:{grid:{display:false}, ticks:{color:tickColor, maxRotation:90, minRotation:90}} } }
     });
   }
+}
+
+// 가로 막대 차트 공용 헬퍼 (품질/센터/VOC 시각화)
+function drawBarChart(canvasId, labels, values, color, horizontal){
+  const el = document.getElementById(canvasId);
+  if (!el || !labels.length) return null;
+  return new Chart(el, {
+    type: "bar",
+    data: { labels, datasets: [{ data: values, backgroundColor: color, borderRadius: 4 }] },
+    options: {
+      indexAxis: horizontal ? "y" : "x",
+      plugins: { legend: { display:false } },
+      scales: { x:{ grid:{color:"#28324D"}, ticks:{font:{size:10}} }, y:{ grid:{display:false}, ticks:{font:{size:10}} } }
+    }
+  });
+}
+function drawStackedScoreChart(canvasId, dist){
+  const el = document.getElementById(canvasId);
+  if (!el) return null;
+  return new Chart(el, {
+    type: "bar",
+    data: {
+      labels: ["1점","2점","3점","4점","5점"],
+      datasets: [{
+        data: [dist[1],dist[2],dist[3],dist[4],dist[5]],
+        backgroundColor: ["#F0555B","#F0555B99","#E8A33D","#2FBF8F99","#2FBF8F"],
+        borderRadius: 4
+      }]
+    },
+    options: { plugins:{legend:{display:false}}, scales:{ y:{grid:{color:"#28324D"}, beginAtZero:true}, x:{grid:{display:false}} } }
+  });
 }
 
 function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend, recentTotalsWithDep }){
