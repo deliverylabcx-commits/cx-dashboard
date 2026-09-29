@@ -99,6 +99,25 @@ const ONBOARD_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_al
 const CALL_SUCCESS_RESULTS = ["콜완료"];
 // 신규 온보딩 VOC 서베이 (구글 폼 응답). 아래 URL은 해당 시트를 "웹에 게시(CSV)" 한 주소로 교체해야 동작합니다.
 const SURVEY_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRe95hvtY4zItohZNS7zsc_fqwKREl9ZvPzXWDTZc6BKKLcAgxc7vPodko6gReftJcKQ0vJfm2QC9lG/pub?output=csv"; // 통화 성공으로 집계할 Call_result 값
+// NPS 해석 기준 (5점 척도 환산 기준이라 외부 벤치마크와 직접 비교는 지양)
+const NPS_TIERS = [
+  { min: 50, label: "매우 우수", color: "var(--good)" },
+  { min: 30, label: "우수",     color: "var(--good)" },
+  { min: 10, label: "양호",     color: "var(--accent)" },
+  { min: -Infinity, label: "개선 필요", color: "var(--bad)" },
+];
+function npsTier(v){
+  if (v == null) return { label: "-", color: "var(--ink-dim)" };
+  return NPS_TIERS.find(t => v >= t.min);
+}
+// 아웃콜 시간대 "잘 받는 시간" 판정 기준 - 단순 최댓값이 아니라 절대 기준선으로 판정
+const OUTCALL_HOUR_GOOD_RATE = 0.40; // 성공률 40% 이상이면 "잘 받는 시간대"
+const OUTCALL_HOUR_MIN_SAMPLE = 10;  // 이 건수 미만은 표본 부족으로 판정 보류
+// 온보딩 → 발주 전환 타겟
+const CONVERSION_TARGETS = {
+  "2발주":  { rate: 0.40, leadDays: 7 },   // 전환율 40% 이상, 평균 7일 이내
+  "5발주":  { rate: 0.15, leadDays: 14 },  // 전환율 15% 이상, 평균 14일 이내
+};
 // 화면 표시용 카테고리 명칭 (데이터 키는 시트 원본 그대로 유지)
 const CATEGORY_LABELS = { "5발주": "3~5발주" };
 function catLabel(c){ return CATEGORY_LABELS[c] || c; }
@@ -111,7 +130,7 @@ function scheduleStatusColor(st){
   return "var(--good)";
 }
 const DELAY_PENALTY = 10; // 지연 1건당 감점 (생산성 점수 신속성 항목)
-const OUTCALL_TARGET_RATE = 0.70; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
+const OUTCALL_TARGET_RATE = 0.50; // 아웃콜 통화 성공률 타겟 (신규온보딩/2발주/5발주 공통)
 const LEAD_TIME_CAP_MIN = 180; // 30분 지연건 평균 소요시간(참고) 계산 시, 이 값(3시간)을 넘는 값은 데이터 오류로 간주해 제외
 const LETTERING_START = "8/11"; // 모바일 레터링 서비스 운영 시작일 - 전후 비교 기준
 const UNPROCESSED_STATES = ["missed","opened","snoozed"]; // 미처리로 집계할 상태값 (closed=종료, initial=미배정 대기는 제외)
@@ -787,38 +806,46 @@ function onboardConversion(onboardCalls, dateFilter){
 function buildHourlyCardHTML(hourlyStats, scopeLabel){
   const cats = Object.keys(hourlyStats);
   if (!cats.length) return `<div style="color:var(--ink-dim);font-size:13px;">해당 기간 아웃콜 데이터가 없습니다.</div>`;
-  const MIN_SAMPLE = 5;
-  let html = `<div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.7;">
+  const TH = OUTCALL_HOUR_GOOD_RATE, MIN = OUTCALL_HOUR_MIN_SAMPLE;
+  let html = `<div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.75;">
     <b style="color:var(--accent);">이 표를 보는 법</b><br>
-    같은 아웃콜이라도 <b>거는 시간대에 따라 고객이 전화를 받는 비율이 다릅니다.</b>
-    성공률이 높은 시간대(★)에 콜을 집중하면 같은 인원으로 더 많은 고객과 연결될 수 있습니다.
-    성공률 = 콜완료 ÷ 총 콜 (부재·통화거부·수신거부는 실패로 집계, ${MIN_SAMPLE}건 이상 시간대만 ★ 후보)
+    성공률 = 콜완료 ÷ 총 콜 (부재·통화거부·수신거부는 실패로 집계).
+    <b>절대 기준선 ${Math.round(TH*100)}%</b>를 넘고 표본이 <b>${MIN}건 이상</b>인 시간대를 <b style="color:var(--good);">✅ 권장 시간대</b>로 표시합니다.
+    단순히 그 카테고리에서 가장 높은 시간이 아니라, 어느 시간대든 기준을 넘으면 권장으로 잡습니다 — 전 시간대가 저조하면 권장 시간대가 없을 수도 있습니다.
+    <span style="color:var(--ink-dim);">표본 ${MIN}건 미만은 우연 변동이 커서 판정을 보류합니다.</span>
   </div>`;
   cats.forEach(cat => {
     const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
-    const eligible = hours.filter(h => hourlyStats[cat][h].total >= MIN_SAMPLE);
+    const eligible = hours.filter(h => hourlyStats[cat][h].total >= MIN);
+    const goodHours = eligible.filter(h => (hourlyStats[cat][h].success/hourlyStats[cat][h].total) >= TH);
     const bestHour = eligible.length ? eligible.reduce((a,b) =>
       (hourlyStats[cat][b].success/hourlyStats[cat][b].total) > (hourlyStats[cat][a].success/hourlyStats[cat][a].total) ? b : a) : null;
-    const worstHour = eligible.length ? eligible.reduce((a,b) =>
-      (hourlyStats[cat][b].success/hourlyStats[cat][b].total) < (hourlyStats[cat][a].success/hourlyStats[cat][a].total) ? b : a) : null;
-    html += `<div style="margin-bottom:20px;">
-      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${catLabel(cat)}</div>
-      ${bestHour!=null ? `<div style="font-size:12px;color:var(--good);margin-bottom:8px;font-weight:600;">
-        ★ ${bestHour}시가 가장 전화를 잘 받는 시간대입니다 (성공률 ${Math.round(hourlyStats[cat][bestHour].success/hourlyStats[cat][bestHour].total*100)}%)
-        ${worstHour!=null && worstHour!==bestHour ? `<span style="color:var(--bad);"> · ${worstHour}시는 가장 낮습니다 (${Math.round(hourlyStats[cat][worstHour].success/hourlyStats[cat][worstHour].total*100)}%)</span>` : ''}
-      </div>` : ''}
+    const catTotal = hours.reduce((s,h)=>s+hourlyStats[cat][h].total,0);
+    const catSucc = hours.reduce((s,h)=>s+hourlyStats[cat][h].success,0);
+    const catRate = catTotal ? catSucc/catTotal : 0;
+    html += `<div style="margin-bottom:22px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${catLabel(cat)}
+        <span style="font-weight:400;color:var(--ink-dim);font-size:11.5px;">· 전체 성공률 ${Math.round(catRate*100)}% (${catSucc}/${catTotal})</span></div>
+      <div style="font-size:12px;margin-bottom:8px;font-weight:600;">
+        ${goodHours.length
+          ? `<span style="color:var(--good);">✅ 권장 시간대: ${goodHours.map(h=>`${h}시(${Math.round(hourlyStats[cat][h].success/hourlyStats[cat][h].total*100)}%)`).join(' · ')}</span>`
+          : `<span style="color:var(--bad);">⚠️ 기준(${Math.round(TH*100)}%)을 넘는 시간대가 없습니다${bestHour!=null?` — 최고는 ${bestHour}시 ${Math.round(hourlyStats[cat][bestHour].success/hourlyStats[cat][bestHour].total*100)}%`:''}</span>`}
+      </div>
       <table style="font-size:12px;">
-        <thead><tr><th>시간</th><th>총 콜</th><th>콜완료</th><th>성공률</th><th></th><th>결과 분포</th></tr></thead>
+        <thead><tr><th>시간</th><th>총 콜</th><th>콜완료</th><th>성공률</th><th>기준 ${Math.round(TH*100)}% 대비</th><th></th><th>결과 분포</th></tr></thead>
         <tbody>
           ${hours.map(h => {
             const s = hourlyStats[cat][h];
             const rate = s.total>0 ? s.success/s.total : 0;
-            const isBest = h === bestHour;
+            const enough = s.total >= MIN;
+            const isGood = enough && rate >= TH;
+            const gap = Math.round((rate - TH)*100);
             return `<tr>
-              <td style="text-align:left;${isBest?'color:var(--good);font-weight:700;':''}">${h}시${isBest?' ★':''}</td>
+              <td style="text-align:left;${isGood?'color:var(--good);font-weight:700;':''}">${h}시${isGood?' ✅':''}</td>
               <td>${s.total}</td><td>${s.success}</td>
-              <td style="${isBest?'color:var(--good);font-weight:700;':''}">${Math.round(rate*100)}%</td>
-              <td style="width:22%;"><div style="background:${isBest?'#2FBF8F':'#4C6EF5'};height:12px;border-radius:3px;width:${Math.round(rate*100)}%;"></div></td>
+              <td style="${isGood?'color:var(--good);font-weight:700;':''}">${Math.round(rate*100)}%</td>
+              <td style="font-size:11px;color:${!enough?'var(--ink-dim)':(isGood?'var(--good)':'var(--bad)')};">${!enough?`표본 부족(${s.total}건)`:(gap>=0?`+${gap}%p`:`${gap}%p`)}</td>
+              <td style="width:20%;"><div style="background:${isGood?'#2FBF8F':'#4C6EF5'};height:12px;border-radius:3px;width:${Math.round(rate*100)}%;"></div></td>
               <td style="text-align:left;color:var(--ink-dim);font-size:11px;">${Object.entries(s.results).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k} ${v}`).join(" · ")}</td>
             </tr>`;
           }).join("")}
@@ -830,27 +857,43 @@ function buildHourlyCardHTML(hourlyStats, scopeLabel){
 }
 
 // 온보딩 → 발주 전환율 카드 (일/주/월 공용)
-function buildConversionCardHTML(conversion){
+function buildConversionCardHTML(conversion, prevConversion, periodLabel){
   if (!conversion || !conversion.base) return `<div style="color:var(--ink-dim);font-size:13px;">해당 기간 온보딩 데이터가 없습니다.</div>`;
-  const t2 = conversion.targets["2발주"], t5 = conversion.targets["5발주"];
+  const tile = (target) => {
+    const s = conversion.targets[target];
+    const p = prevConversion?.targets?.[target];
+    const T = CONVERSION_TARGETS[target] || {};
+    const rateOk = s.rate!=null && T.rate!=null && s.rate >= T.rate;
+    const leadOk = s.avgLead!=null && T.leadDays!=null && s.avgLead <= T.leadDays;
+    const rateDiff = (s.rate!=null && p?.rate!=null) ? s.rate-p.rate : null;
+    const leadDiff = (s.avgLead!=null && p?.avgLead!=null) ? s.avgLead-p.avgLead : null;
+    return `<div class="kpi"><div class="label">${catLabel(target)} 전환</div>
+      <div class="val" style="color:${s.rate==null?'inherit':(rateOk?'var(--good)':'var(--bad)')};">${fmtPct(s.rate)}
+        <span style="font-size:13px;color:var(--ink-dim);">/ ${fmtNum(s.hits)}곳</span></div>
+      <div class="delta" style="font-weight:700;color:${rateOk?'var(--good)':'var(--bad)'};">
+        전환율 타겟 ${T.rate!=null?Math.round(T.rate*100)+'%':'-'} · ${s.rate!=null?(rateOk?'달성':`미달 (${Math.round((T.rate-s.rate)*100)}%p 부족)`):'-'}
+      </div>
+      ${rateDiff!=null?`<div class="delta" style="color:${rateDiff>=0?'var(--good)':'var(--bad)'};">${periodLabel} 대비 ${rateDiff>=0?'▲':'▼'} ${Math.abs(Math.round(rateDiff*100))}%p</div>`:''}
+      <div class="delta" style="margin-top:4px;">리드타임 평균 <b style="color:${leadOk?'var(--good)':'var(--bad)'};">${s.avgLead!=null?s.avgLead.toFixed(1)+'일':'-'}</b> · 타겟 ${T.leadDays!=null?T.leadDays+'일 이내':'-'} ${s.avgLead!=null?(leadOk?'✅':'⚠️'):''}</div>
+      ${leadDiff!=null?`<div class="delta" style="font-size:10.5px;color:${leadDiff<=0?'var(--good)':'var(--bad)'};">${periodLabel} 대비 ${leadDiff<=0?'▼':'▲'} ${Math.abs(leadDiff).toFixed(1)}일</div>`:''}
+      <div class="delta" style="font-size:10.5px;color:var(--ink-dim);">중앙값 ${s.medLead!=null?s.medLead+'일':'-'}</div>
+    </div>`;
+  };
   return `
-    <div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.7;">
+    <div style="font-size:12.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.75;">
       <b style="color:var(--accent);">이 지표를 보는 법</b><br>
       신규 온보딩 콜을 받은 업장이 이후 실제로 <b>2발주·${catLabel("5발주")}까지 이어졌는지</b>를 업장 단위로 추적한 결과입니다.<br>
       · <b>전환율</b> = 온보딩한 업장 중 해당 발주 단계까지 도달한 비율 (높을수록 온보딩이 실제 매출로 연결됨)<br>
-      · <b>리드타임</b> = 온보딩 콜 이후 그 단계에 도달하기까지 걸린 일수 (짧을수록 빠르게 안착)
+      · <b>리드타임</b> = 온보딩 콜 이후 그 단계에 도달하기까지 걸린 일수 (짧을수록 빠르게 안착)<br>
+      · <b>타겟</b>: 2발주 <b>전환율 40% / 7일 이내</b> · ${catLabel("5발주")} <b>전환율 15% / 14일 이내</b>
+      <span style="color:var(--ink-dim);">(실측 기준선에서 도출한 초안이며, 운영 협의 후 조정 가능합니다)</span>
     </div>
     <div class="kpis">
       <div class="kpi"><div class="label">온보딩 진행 업장</div><div class="val">${fmtNum(conversion.base)}</div>
-        <div class="delta">전환율 계산의 기준(모수)</div></div>
-      <div class="kpi"><div class="label">2발주 전환</div>
-        <div class="val">${fmtPct(t2.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(t2.hits)}곳</span></div>
-        <div class="delta">온보딩 ${fmtNum(conversion.base)}곳 중 ${fmtNum(t2.hits)}곳이 2발주까지 진행</div>
-        <div class="delta" style="color:var(--accent);font-weight:600;">평균 ${t2.avgLead!=null?t2.avgLead.toFixed(1)+'일':'-'} 만에 전환 (중앙값 ${t2.medLead!=null?t2.medLead+'일':'-'})</div></div>
-      <div class="kpi"><div class="label">${catLabel("5발주")} 전환</div>
-        <div class="val">${fmtPct(t5.rate)} <span style="font-size:14px;color:var(--ink-dim);">/ ${fmtNum(t5.hits)}곳</span></div>
-        <div class="delta">온보딩 ${fmtNum(conversion.base)}곳 중 ${fmtNum(t5.hits)}곳이 ${catLabel("5발주")}까지 진행</div>
-        <div class="delta" style="color:var(--accent);font-weight:600;">평균 ${t5.avgLead!=null?t5.avgLead.toFixed(1)+'일':'-'} 만에 전환 (중앙값 ${t5.medLead!=null?t5.medLead+'일':'-'})</div></div>
+        <div class="delta">전환율 계산의 기준(모수)</div>
+        ${prevConversion?.base?`<div class="delta">${periodLabel} ${fmtNum(prevConversion.base)}곳</div>`:''}</div>
+      ${tile("2발주")}
+      ${tile("5발주")}
     </div>
     <div style="font-size:11px;color:var(--ink-dim);margin-top:12px;line-height:1.6;">
       업장 매칭은 회원ID를 우선 사용하고, ID가 없는 건은 업장명으로 매칭합니다. 지점 표기가 다른 경우 일부 누락될 수 있습니다.
@@ -1247,8 +1290,25 @@ function buildSurveyCardHTML(s, sPrev, periodLabel){
         <div class="delta">${s.total?Math.round(s.promoters/s.total*100):0}%</div></div>
       <div class="kpi"><div class="label">비추천 (1~2점)</div><div class="val" style="color:var(--bad);">${fmtNum(s.detractors)}</div>
         <div class="delta">${s.total?Math.round(s.detractors/s.total*100):0}%</div></div>
-      <div class="kpi" style="background:var(--panel-2);"><div class="label">NPS 지수</div><div class="val" style="color:var(--accent);">${s.nps!=null?Math.round(s.nps):'-'}</div>
-        <div class="delta">추천 − 비추천 비율</div></div>
+      <div class="kpi" style="background:var(--panel-2);"><div class="label">NPS 지수</div>
+        <div class="val" style="color:${npsTier(s.nps).color};">${s.nps!=null?Math.round(s.nps):'-'}
+          <span style="font-size:13px;">${s.nps!=null?npsTier(s.nps).label:''}</span></div>
+        <div class="delta">${(() => {
+          const prevNps = sPrev?.nps;
+          if (prevNps==null || s.nps==null) return '추천 − 비추천 비율';
+          const d = s.nps - prevNps;
+          return `${periodLabel} ${Math.round(prevNps)} → ${Math.round(s.nps)} (${d>=0?'▲':'▼'} ${Math.abs(Math.round(d))})`;
+        })()}</div></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--ink);background:var(--panel-2);border-radius:8px;padding:12px 14px;margin-bottom:16px;line-height:1.75;">
+      <b style="color:var(--accent);">NPS 지수 읽는 법</b><br>
+      <b>계산식</b>: (추천 비율 − 비추천 비율) × 100 · 범위는 <b>−100 ~ +100</b>이며 100점 만점이 아닙니다. 3점(중립)은 가감 없이 분모에만 포함됩니다.<br>
+      <b>판정 기준</b>:
+      <span style="color:var(--bad);font-weight:700;">10 미만 개선 필요</span> ·
+      <span style="color:var(--accent);font-weight:700;">10↑ 양호</span> ·
+      <span style="color:var(--good);font-weight:700;">30↑ 우수</span> ·
+      <span style="color:var(--good);font-weight:700;">50↑ 매우 우수</span><br>
+      <span style="color:var(--ink-dim);">※ 정통 NPS는 0~10점 척도(9~10 추천/0~6 비추천) 기준입니다. 본 서베이는 5점 척도를 4~5=추천 / 3=중립 / 1~2=비추천으로 환산한 값이라, 외부 업계 벤치마크와 직접 비교보다 <b>자체 기간별 추세 비교</b>에 활용하시길 권합니다.</span>
     </div>
     <div style="display:flex;gap:18px;flex-wrap:wrap;">
       <div style="flex:1;min-width:260px;">
@@ -2150,7 +2210,7 @@ function render(data){
     <div class="grid1">
       <div class="card">
         <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간 누적 (리드타임 특성상 일별 산정 불가)</span></h2>
-        ${buildConversionCardHTML(conversionAll)}
+        ${buildConversionCardHTML(conversionAll, null, "")}
       </div>
     </div>
 
@@ -2422,6 +2482,8 @@ function renderWeekly(data){
   const weekDateSet = new Set(week.dates);
   const hourlyStatsWeek = outcallHourlyStats(onboardCalls, d => weekDateSet.has(d.dateMD));
   const conversionAllW = onboardConversion(onboardCalls);
+  const conversionWeek = onboardConversion(onboardCalls, d => weekDateSet.has(d.dateMD));
+  const conversionWeekPrev = prevWeek ? onboardConversion(onboardCalls, d => new Set(prevWeek.dates).has(d.dateMD)) : null;
   const mboWeekPrev = mboWeekStats(prevWeek);
 
   const weeklyInsights = [];
@@ -2696,7 +2758,7 @@ function renderWeekly(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간 누적 (리드타임 특성상 주간 단독 산정 불가)</span></h2>
-      ${buildConversionCardHTML(conversionAllW)}
+      ${buildConversionCardHTML(conversionWeek.base ? conversionWeek : conversionAllW, conversionWeek.base ? conversionWeekPrev : null, "전주")}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -2981,6 +3043,8 @@ function renderMonthly(data){
   // 아웃콜 시간대별 성공률 + 온보딩 전환율 (전체 기간 기준)
   const hourlyStats = outcallHourlyStats(onboardCalls);
   const conversion = onboardConversion(onboardCalls);
+  const conversionMonth = onboardConversion(onboardCalls, d => monthDateSet.has(d.dateMD));
+  const conversionMonthPrev = prevMonth ? onboardConversion(onboardCalls, d => new Set(prevMonth.dates).has(d.dateMD)) : null;
   const hourlyCats = Object.keys(hourlyStats);
   hourlyCats.forEach(cat => {
     const hours = Object.keys(hourlyStats[cat]).map(Number).sort((a,b)=>a-b);
@@ -3076,7 +3140,7 @@ function renderMonthly(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>온보딩 → 발주 전환율 <span class="tag">전체 기간</span></h2>
-      ${buildConversionCardHTML(conversion)}
+      ${buildConversionCardHTML(conversionMonth.base ? conversionMonth : conversion, conversionMonth.base ? conversionMonthPrev : null, "전월")}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
