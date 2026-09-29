@@ -1082,24 +1082,39 @@ function normalizeSupplier(nameRaw){
   return nameRaw.replace(/^\([^)]*\)\s*/, "").trim() || nameRaw.trim();
 }
 // 상담 설명에서 상품 대분류 판정 (엑셀 분석과 동일한 키워드 방식)
-const PRODUCT_CATEGORY_KEYWORDS = {
-  "농산": ["채소","야채","상추","로메인","적근대","치커리","깻잎","대파","양파","배추","당근","고추","오이","호박","단호박","버섯","감자","고구마","토마토","사과","수박","참외","과일","쌈","나물","시금치","부추","마늘","생강","브로콜리","파프리카","가지","콩나물","숙주","양배추","알배추","청경채","깐마늘","새송이","팽이"],
-  "축산": ["계란","달걀","돼지","소고기","닭","육류","삼겹","목살","한우","우육","돈육","계육","베이컨","햄"],
-  "수산": ["오징어","생선","새우","문어","조개","해산물","고등어","연어","낙지","멸치","미역","다시마","수산","해동"],
-  "가공": ["두부","면","소스","장류","통조림","가공","빵","떡","만두","치즈","우유","유제품","음료","튀김가루","밀가루","설탕","식용유"],
+// 공급사 → 취급 품목 대분류 (가장 신뢰도 높은 1차 근거). 공급사명 접두사 제거 후 매칭
+const SUPPLIER_CATEGORY = {
+  "이삭":"농산", "농부사랑":"농산", "농부네":"농산", "해담채":"농산", "그로우":"농산",
+  "원흥축산":"축산", "한성에그촌":"축산", "평창양계":"축산",
+  "베이킹몬":"가공", "강릉심층수두부":"가공", "푸디스트":"가공", "현대그린푸드":"가공",
 };
-function classifyProductCategory(text){
-  if (!text) return "기타";
-  for (const [cat, kws] of Object.entries(PRODUCT_CATEGORY_KEYWORDS)){
-    if (kws.some(k => text.includes(k))) return cat;
+// 상담 설명 기반 보조 판정. 1글자·중의어(면/무/김/사과/배/감)는 오탐이 심해 제외하고 구체 키워드만 사용
+const PRODUCT_CATEGORY_KEYWORDS = {
+  "농산": ["채소","야채","상추","로메인","적근대","치커리","깻잎","대파","양파","배추","당근","고추","오이","호박","단호박","버섯","감자","고구마","토마토","수박","참외","과일","쌈","나물","시금치","부추","마늘","생강","브로콜리","파프리카","가지","콩나물","숙주","양배추","알배추","청경채","깐마늘","새송이","팽이","느타리","만가닥","파인애플","바나나","딸기","포도","블루베리","아보카도","레몬","라임","샐러리","비트","무말랭이","깐무","총각무"],
+  "축산": ["계란","달걀","돼지","소고기","닭","육류","삼겹","목살","한우","우육","돈육","계육","베이컨","갈비","등심","안심","차돌","살코기","정육","닭가슴"],
+  "수산": ["오징어","생선","새우","문어","조개","해산물","고등어","연어","낙지","멸치","미역","다시마","수산","전복","명태","임연수","갈치","조기"],
+  "가공": ["두부","라면","국수","우동","소면","파스타","소스","장류","통조림","가공","빵","떡","만두","치즈","우유","유제품","음료","튀김가루","밀가루","설탕","식용유","난백","계란액","마요","케첩","식초","간장","된장","고추장"],
+};
+function classifyProductCategory(text, supplier){
+  // 1순위: 공급사 기준 (이삭·농부사랑·농부네 등은 농산 전문)
+  if (supplier && SUPPLIER_CATEGORY[supplier]) return SUPPLIER_CATEGORY[supplier];
+  // 2순위: 상담 설명의 구체 상품 키워드
+  if (text){
+    for (const [cat, kws] of Object.entries(PRODUCT_CATEGORY_KEYWORDS)){
+      if (kws.some(k => text.includes(k))) return cat;
+    }
   }
   return "기타";
 }
+
 // 배송/품질 이슈 키워드 (센터별·유형별 집계용)
-const ISSUE_KEYWORDS = ["파손","해동","냉해","분실","누락","오배송","변질","부패","신선도","지연","미입고","부분입고","곰팡이","중량"];
-function detectIssueKeywords(text, tagStr){
+// 센터(허브)는 "배송" 담당이므로, 센터 귀책으로 볼 수 있는 배송/콜드체인 이슈만 집계한다.
+// 중량미달·미입고·부분입고·변질 등은 공급사/품질 귀책이라 센터 집계에서 제외한다.
+const DELIVERY_ISSUE_KEYWORDS = ["파손","해동","냉해","분실","누락","오배송","미배송","지연","회수"];
+const QUALITY_ISSUE_KEYWORDS = ["변질","부패","신선도","곰팡이","짓무름","변색","중량","미입고","부분입고","품절"];
+function detectIssueKeywords(text, tagStr, kwSet){
   const hay = `${text||""} ${tagStr||""}`;
-  return ISSUE_KEYWORDS.filter(k => hay.includes(k));
+  return (kwSet || DELIVERY_ISSUE_KEYWORDS).filter(k => hay.includes(k));
 }
 // 기간 내 품질불량 건 분석: 공급사별 / 상품대분류별 / 처리유형별
 function analyzeQualityIssues(rawLog, dateSet){
@@ -1111,7 +1126,7 @@ function analyzeQualityIssues(rawLog, dateSet){
   rows.forEach(r => {
     const supplier = normalizeSupplier(tagValue(r.tags, "공급사/공급사명/")) || "미기재";
     const type = tagValue(r.tags, "공급사/품질불량/") || "미분류";
-    const cat = classifyProductCategory(r.desc);
+    const cat = classifyProductCategory(r.desc, supplier);
     bySupplier[supplier] = bySupplier[supplier] || { total:0, types:{} };
     bySupplier[supplier].total++;
     bySupplier[supplier].types[type] = (bySupplier[supplier].types[type]||0)+1;
@@ -1124,13 +1139,13 @@ function analyzeQualityIssues(rawLog, dateSet){
   return { total: rows.length, bySupplier, byCategory, byType };
 }
 // 기간 내 배송/품질 이슈를 키워드별로 집계 (센터 정보가 있으면 센터별로도)
-function analyzeIssueKeywords(rawLog, dateSet, centerOf){
+function analyzeIssueKeywords(rawLog, dateSet, centerOf, kwSet){
   const rows = (rawLog||[]).filter(r => (!dateSet || dateSet.has(r.date)) && (/품질불량|공급사클레임|배송/.test(r.tags||"")));
   const byKeyword = {};
   const byCenter = {};
   let centerKnown = 0;
   rows.forEach(r => {
-    const kws = detectIssueKeywords(r.desc, r.tags);
+    const kws = detectIssueKeywords(r.desc, r.tags, kwSet);
     if (!kws.length) return;
     const center = centerOf ? centerOf(r) : null;
     if (center) centerKnown++;
@@ -2623,8 +2638,13 @@ function renderMonthly(data){
   const qualityMonth = analyzeQualityIssues(rawLog, monthDateSet);
   const qualityPrev = prevMonth ? analyzeQualityIssues(rawLog, new Set(prevMonth.dates)) : null;
   const centerOf = (r) => (r.center && r.center.trim()) ? r.center.trim() : null;
-  const issueKwMonth = analyzeIssueKeywords(rawLog, monthDateSet, centerOf);
-  const issueKwPrev = prevMonth ? analyzeIssueKeywords(rawLog, new Set(prevMonth.dates), centerOf) : null;
+  // 센터(배송 귀책) 집계 - 배송/콜드체인 이슈만
+  const issueKwMonth = analyzeIssueKeywords(rawLog, monthDateSet, centerOf, DELIVERY_ISSUE_KEYWORDS);
+  const issueKwPrev = prevMonth ? analyzeIssueKeywords(rawLog, new Set(prevMonth.dates), centerOf, DELIVERY_ISSUE_KEYWORDS) : null;
+  // 공급사/품질 귀책 집계 - 중량미달·미입고·변질 등
+  const qualKwMonth = analyzeIssueKeywords(rawLog, monthDateSet, null, QUALITY_ISSUE_KEYWORDS);
+  const qualKwPrev = prevMonth ? analyzeIssueKeywords(rawLog, new Set(prevMonth.dates), null, QUALITY_ISSUE_KEYWORDS) : null;
+  const qualKwSorted = Object.entries(qualKwMonth.byKeyword).sort((a,b)=>b[1]-a[1]);
   const centerRows = Object.entries(issueKwMonth.byCenter).sort((a,b)=>b[1].total-a[1].total);
   const centerKwCols = kwTop => kwTop;
   const qSuppliers = Object.entries(qualityMonth.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,10);
@@ -2880,20 +2900,45 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>배송·품질 이슈 유형별 (월간) <span class="tag">파손 · 해동 · 냉해 · 분실 등 키워드 기준</span></h2>
-      <table>
-        <thead><tr><th>이슈 유형</th><th>건수</th><th>비중</th><th>전월 대비</th></tr></thead>
-        <tbody>
-          ${kwSorted.map(([k,n]) => {
-            const totalKw = sum(kwSorted.map(x=>x[1]));
-            const prev = issueKwPrev?.byKeyword?.[k];
-            const diff = prev!=null ? n-prev : null;
-            return `<tr><td style="text-align:left;font-weight:600;">${k}</td><td>${fmtNum(n)}</td>
-              <td>${totalKw?Math.round(n/totalKw*100):0}%</td>
-              <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
-          }).join("") || '<tr><td colspan="4" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
-        </tbody>
-      </table>
+      <h2>이슈 유형별 (월간) <span class="tag">귀책 구분 · 배송(센터) vs 품질(공급사)</span></h2>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:280px;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--accent);">배송 귀책 (센터)</div>
+          <table>
+            <thead><tr><th>이슈 유형</th><th>건수</th><th>비중</th><th>전월 대비</th></tr></thead>
+            <tbody>
+              ${kwSorted.map(([k,n]) => {
+                const totalKw = sum(kwSorted.map(x=>x[1]));
+                const prev = issueKwPrev?.byKeyword?.[k];
+                const diff = prev!=null ? n-prev : null;
+                return `<tr><td style="text-align:left;font-weight:600;">${k}</td><td>${fmtNum(n)}</td>
+                  <td>${totalKw?Math.round(n/totalKw*100):0}%</td>
+                  <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
+              }).join("") || '<tr><td colspan="4" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div style="flex:1;min-width:280px;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--good);">품질·공급 귀책 (공급사)</div>
+          <table>
+            <thead><tr><th>이슈 유형</th><th>건수</th><th>비중</th><th>전월 대비</th></tr></thead>
+            <tbody>
+              ${qualKwSorted.map(([k,n]) => {
+                const totalKw = sum(qualKwSorted.map(x=>x[1]));
+                const prev = qualKwPrev?.byKeyword?.[k];
+                const diff = prev!=null ? n-prev : null;
+                return `<tr><td style="text-align:left;font-weight:600;">${k}</td><td>${fmtNum(n)}</td>
+                  <td>${totalKw?Math.round(n/totalKw*100):0}%</td>
+                  <td style="color:${diff==null?'var(--ink-dim)':(diff<=0?'var(--good)':'var(--bad)')};">${diff!=null?(diff<=0?'▼ ':'▲ ')+Math.abs(diff)+'건':'-'}</td></tr>`;
+              }).join("") || '<tr><td colspan="4" style="color:var(--ink-dim);">데이터 없음</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:12px;line-height:1.6;">
+        센터(허브)는 <b>배송을 담당</b>하므로 아래 센터별 표에는 배송 귀책 이슈만 집계합니다.
+        <b>중량</b>(중량 미달 = 주문 대비 실제 무게 부족)과 <b>미입고·부분입고</b>는 공급사가 물량을 덜 보낸 건이라 품질·공급 귀책으로 분류했습니다.
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
