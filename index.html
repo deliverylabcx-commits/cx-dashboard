@@ -141,7 +141,7 @@ const MBO_WEIGHTS = {
   maru:     { claim:20, delay:10, outcall:25 },
   Tsuna:    { claim:20, delay:10, outcall:25 },
   Hugo:     { claim:20, delay:10, outcall:25 },
-  Scarlett: { claim:20, delay:10, outcall:25 },
+  Scarlett: { claim:20, delay:10, outcall:25 }, // 퇴사 - 과거 기간 조회 시 참고용으로 보존
 };
 function durationToMinutes(hhmmss){
   if (!hhmmss) return null;
@@ -307,8 +307,8 @@ const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30�
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈","부재율"];
 const AGENT_COLORS = { Punisher:"#4C6EF5", maru:"#12B886", Zenze:"#F76707", Tsuna:"#BE4BDB", Hugo:"#FA5252", Carol:"#748FFC", Scarlett:"#E64980" };
-const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol","Scarlett"]; // Zenze 8/1 퇴사로 제외 / Scarlett 신규 입사
-const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze"]; // 퇴사자 - 개별 카드/MBO에는 노출하지 않되 전체 인입 합계에는 포함
+const AGENT_ORDER = ["Punisher","maru","Tsuna","Hugo","Carol"]; // 퇴사자(Zenze·Carol·Scarlett)는 개별 지표에서 제외 - 과거 실적은 시트 Total 행에 그대로 남아 합계에 반영됨
+const DEPARTED_INBOUND_AGENTS = ["Carol","Zenze","Scarlett"]; // 퇴사자 - 개별 카드/MBO에는 노출하지 않되 전체 인입 합계에는 포함
 // 시트(CS_Tracking)에 행이 없는 퇴사자만 RAW 로그로 보정한다. 시트에 이미 집계된 인원(예: Zenze)은 Total 행에 포함돼 있어 중복 가산 금지.
 function departedInboundByDate(rawLog, sections){
   const m = new Map();
@@ -2225,7 +2225,7 @@ function render(data){
           <canvas id="chartMboTrend"></canvas>
         </div>
         <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo·Scarlett(20/10/25) 기준 · 30분 지연 달성률은 지연 비율(3%↓) 기준으로 산정 (평균 소요시간은 참고용)
+          가중치는 Punisher(10/15/15), maru·Tsuna·Hugo(20/10/25) 기준 · 30분 지연 달성률은 지연 비율(3%↓) 기준으로 산정 (평균 소요시간은 참고용)
         </div>
       </div>
     </div>
