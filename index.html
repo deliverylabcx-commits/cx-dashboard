@@ -676,7 +676,9 @@ function parseRawLog(text){
     const found = header.findIndex(h => (h||"").trim().toLowerCase() === cand.toLowerCase());
     if (found >= 0){ idx.center = found; break; }
   }
-  const URL_COL_INDEX = 97; // 98번째 컬럼(1-indexed) = 채널톡 URL
+  // 채널톡 URL: 헤더 "url" 우선 (경량 RAW 탭 대응), 없으면 기존 98번째 컬럼(CT)
+  const urlByName = header.findIndex(h => (h||"").toLowerCase() === "url");
+  const URL_COL_INDEX = urlByName >= 0 ? urlByName : 97;
   const createdAtRe = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/;
   const out = [];
   for (let r = headerIdx + 1; r < rows.length; r++){
@@ -712,34 +714,18 @@ async function fetchCSV(url){
 }
 
 async function loadMainData(){
-  const csText = await fetchCSV(CSV_URL);
-  let schedule = { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} };
-  let outcall = { dates: [], categories: [], data: {} };
-  let delay30 = [];
-  let delayHold = [];
-
-  try { schedule = parseSchedule(await fetchCSV(SCHEDULE_CSV_URL)); }
-  catch(e){ console.warn("스케줄 시트를 불러오지 못했습니다:", e.message); }
-
-  try { outcall = parseOutCall(await fetchCSV(OUTCALL_CSV_URL)); }
-  catch(e){ console.warn("Out Call_Tracking 시트를 불러오지 못했습니다:", e.message); }
-
-  try { delay30 = parseDelayRows(await fetchCSV(DELAY30_CSV_URL)); }
-  catch(e){ console.warn("30분 지연 체크 시트를 불러오지 못했습니다:", e.message); }
-
-  try { delayHold = parseDelayRows(await fetchCSV(DELAYHOLD_CSV_URL)); }
-  catch(e){ console.warn("응대지연_보류 시트를 불러오지 못했습니다:", e.message); }
-
-  let onboardCalls = [];
-  try { onboardCalls = parseOnboardCalls(await fetchCSV(ONBOARD_CSV_URL)); }
-  catch(e){ console.warn("신규 온보딩_Out Call 시트를 불러오지 못했습니다:", e.message); }
-
-  let survey = [];
-  if (SURVEY_CSV_URL){
-    try { survey = parseSurvey(await fetchCSV(SURVEY_CSV_URL)); }
-    catch(e){ console.warn("온보딩 VOC 서베이 시트를 불러오지 못했습니다:", e.message); }
-  }
-
+  // 모든 시트를 "동시에" 요청 (예전엔 하나씩 순서대로 받아서 6~7개 × 0.6초씩 대기가 누적됐음)
+  const opt = (url, parser, fallback, name) => (url ? fetchCSV(url).then(parser) : Promise.resolve(fallback))
+    .catch(e => { console.warn(name + " 시트를 불러오지 못했습니다:", e.message); return fallback; });
+  const [csText, schedule, outcall, delay30, delayHold, onboardCalls, survey] = await Promise.all([
+    fetchCSV(CSV_URL),
+    opt(SCHEDULE_CSV_URL, parseSchedule, { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} }, "스케줄"),
+    opt(OUTCALL_CSV_URL, parseOutCall, { dates: [], categories: [], data: {} }, "Out Call_Tracking"),
+    opt(DELAY30_CSV_URL, parseDelayRows, [], "30분 지연 체크"),
+    opt(DELAYHOLD_CSV_URL, parseDelayRows, [], "응대지연_보류"),
+    opt(ONBOARD_CSV_URL, parseOnboardCalls, [], "온보딩 아웃콜"),
+    opt(SURVEY_CSV_URL, parseSurvey, [], "온보딩 VOC 서베이"),
+  ]);
   return { ...parseCSV(csText), schedule, outcall, delay30, delayHold, onboardCalls, survey };
 }
 
@@ -4192,29 +4178,77 @@ function startCountdown(){
   }, 1000);
 }
 
+/* ---- 브라우저 캐시 (IndexedDB): 재방문 시 직전 데이터를 즉시 표시하고, 최신 데이터는 뒤에서 받아 교체 ---- */
+const CACHE_DB = "cx-dashboard-cache", CACHE_STORE = "kv";
+function cacheDb(){
+  return new Promise((res, rej) => {
+    try {
+      const req = indexedDB.open(CACHE_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(CACHE_STORE);
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    } catch(e){ rej(e); }
+  });
+}
+async function cacheGet(key){
+  try { const db = await cacheDb(); return await new Promise(res => { const r = db.transaction(CACHE_STORE).objectStore(CACHE_STORE).get(key); r.onsuccess = () => res(r.result); r.onerror = () => res(null); }); }
+  catch(e){ return null; }
+}
+async function cacheSet(key, val){
+  try { const db = await cacheDb(); db.transaction(CACHE_STORE, "readwrite").objectStore(CACHE_STORE).put(val, key); }
+  catch(e){ /* 캐시는 편의 기능 - 실패해도 무시 */ }
+}
+
 async function refresh(manual){
   try{
     const main = await loadMainData();
     const rawLog = lastLoadedData?.rawLog || [];
     lastLoadedData = { ...main, rawLog };
     render(lastLoadedData);
+    cacheSet("main", main);
   }catch(e){
     console.error(e);
-    if (manual) alert("데이터를 불러오지 못했습니다: " + e.message);
+    if (manual && !lastLoadedData) alert("데이터를 불러오지 못했습니다: " + e.message);
   }
 }
 
 async function refreshRawLog(){
   const rawLog = await loadRawLog();
+  if (!rawLog.length && lastLoadedData?.rawLog?.length) return; // 실패 시 기존(캐시) 데이터 유지
   if (lastLoadedData){
     lastLoadedData.rawLog = rawLog;
     render(lastLoadedData);
   }
+  cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
+  return rawLog;
 }
 
 async function initialLoad(){
-  await refresh(true);
-  await refreshRawLog(); // RAW 로그(6MB+)는 최초 1회만 함께 로드, 이후 30분 주기로 별도 갱신
+  // 1) RAW(대용량)와 메인 시트를 동시에 요청 시작
+  const rawPromise = loadRawLog();
+  const mainPromise = loadMainData();
+  // 2) 직전 방문 데이터가 있으면 먼저 화면에 표시 (수 초 대기 없이 바로 보임)
+  const [cMain, cRaw] = await Promise.all([cacheGet("main"), cacheGet("raw")]);
+  if (cMain && !lastLoadedData){
+    const rl = cRaw && cRaw.rows ? cRaw.rows : [];
+    if (cRaw) rl.hasVipTags = cRaw.hasVipTags;
+    lastLoadedData = { ...cMain, rawLog: rl };
+    try { render(lastLoadedData); } catch(e){ console.warn("캐시 렌더 실패", e); lastLoadedData = null; }
+  }
+  // 3) 최신 메인 데이터 반영
+  try {
+    const main = await mainPromise;
+    lastLoadedData = { ...main, rawLog: lastLoadedData?.rawLog || [] };
+    render(lastLoadedData);
+    cacheSet("main", main);
+  } catch(e){ console.error(e); if (!lastLoadedData) alert("데이터를 불러오지 못했습니다: " + e.message); }
+  // 4) 최신 RAW 반영
+  const rawLog = await rawPromise;
+  if (lastLoadedData && (rawLog.length || !lastLoadedData.rawLog.length)){
+    lastLoadedData.rawLog = rawLog;
+    render(lastLoadedData);
+    cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
+  }
   setInterval(refreshRawLog, RAWLOG_REFRESH_MS);
 }
 
