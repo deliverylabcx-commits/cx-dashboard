@@ -1608,11 +1608,10 @@ const VIP_GRADE_COLORS = { 4:"#4C6EF5", 5:"#E8A33D", 6:"#E64980" };
 const VIP_HOLIDAYS = ["8/15","8/17","9/24","9/25","9/26","9/28","10/3","10/5","10/9"];
 const VIP_UNPROCESSED = ["missed","opened","snoozed"]; // 미처리 (closed=종료, initial=대기는 제외)
 const VIP_EXTRA_AGENT_COLORS = { songsong:"#20C997", "미배정":"#5C677D" };
-// 소문자 tags(상담 분류)의 중분류 → 화면 표시명
+// 소문자 tags(상담 분류)의 중분류 중 "실제 이슈"만 집계 (환불·퀵 등 처리유형, 부재·중복·CALL·공급사명 제외)
 const VIP_ISSUE_GROUPS = {
-  "품질불량":"품질불량", "공급사클레임":"공급사 클레임", "배송클레임":"배송 클레임",
-  "배송문의":"배송 문의", "서비스이용문의":"서비스 이용문의", "주문결제":"주문·결제",
-  "부재":"부재(미운영시간)", "중복":"중복"
+  "품질불량":"품질불량", "공급사클레임":"공급사클레임", "배송클레임":"배송클레임",
+  "배송문의":"배송문의", "서비스이용문의":"서비스이용문의", "주문결제":"주문결제"
 };
 const VIP_SEL_STYLE = "background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:7px 10px;border-radius:8px;font-size:13px;";
 
@@ -1626,47 +1625,33 @@ function vipMdKey(md){ const [m,d] = md.split("/").map(Number); return m*100+d; 
 function vipTodayMD(){ const t = new Date(); return `${t.getMonth()+1}/${t.getDate()}`; }
 function vipIsWorkday(md){ return weekdayOf(md) !== 0 && !VIP_HOLIDAYS.includes(md); }
 
-// 상담 분류 tags → [{group, detail}] (공급사명·CALL 채널·고객설명 등 분류가 아닌 태그 제외)
+// 상담 분류 tags → 이슈 유형 목록 (중분류 기준, 화이트리스트만)
 function vipIssueTags(tagStr){
-  const out = [];
+  const out = new Set();
   (tagStr||"").split(",").map(t=>t.trim()).filter(Boolean).forEach(t => {
     const parts = t.split("/").map(x=>x.trim());
-    if (parts.length < 2) return;
-    const mid = parts[1];
-    if (mid === "공급사명" || parts[0] === "CALL") return;
-    const group = VIP_ISSUE_GROUPS[mid] || mid;
-    const leaf = parts[2] || "";
-    let detail;
-    if (mid === "품질불량") detail = leaf ? `품질불량 · ${leaf}` : "품질불량";
-    else if (mid === "공급사클레임") detail = leaf ? `공급사 · ${leaf}` : "공급사 클레임";
-    else if (mid === "배송클레임") detail = leaf ? `배송 · ${leaf}` : "배송 클레임";
-    else if (mid === "부재" || mid === "중복" || !leaf) detail = group;
-    else detail = `${group} · ${leaf}`;
-    out.push({ group, detail });
+    if (parts.length >= 2 && VIP_ISSUE_GROUPS[parts[1]]) out.add(VIP_ISSUE_GROUPS[parts[1]]);
   });
-  return out;
+  return [...out];
 }
 
 function vipStats(rows, dateSet){
   const st = { total:0, g:{4:0,5:0,6:0}, closed:0, gClosed:{4:0,5:0,6:0}, unproc:0, gUnproc:{4:0,5:0,6:0}, waiting:0,
-               agents:{}, groups:{}, details:{}, groupByGrade:{}, unprocRows:[], untagged:0 };
+               agents:{}, groups:{}, groupByGrade:{}, unprocRows:[] };
   rows.forEach(r => {
     if (dateSet && !dateSet.has(r.date)) return;
     const s = (r.state||"").toLowerCase();
     st.total++; st.g[r.vip]++;
-    const ag = r.agent || "미배정";
+    const ag = r.agent;
     const a = st.agents[ag] = st.agents[ag] || { total:0, g:{4:0,5:0,6:0}, closed:0, unproc:0 };
     a.total++; a.g[r.vip]++;
     if (s === "closed"){ st.closed++; st.gClosed[r.vip]++; a.closed++; }
     else if (VIP_UNPROCESSED.includes(s)){ st.unproc++; st.gUnproc[r.vip]++; a.unproc++; st.unprocRows.push(r); }
     else if (s === "initial") st.waiting++;
-    const iss = vipIssueTags(r.tags);
-    if (!iss.length) st.untagged++;
-    const seenG = new Set(), seenD = new Set();
-    iss.forEach(({group, detail}) => {
-      if (!seenG.has(group)){ seenG.add(group); st.groups[group] = (st.groups[group]||0)+1;
-        st.groupByGrade[group] = st.groupByGrade[group] || {4:0,5:0,6:0}; st.groupByGrade[group][r.vip]++; }
-      if (!seenD.has(detail)){ seenD.add(detail); st.details[detail] = (st.details[detail]||0)+1; }
+    vipIssueTags(r.tags).forEach(group => {
+      st.groups[group] = (st.groups[group]||0)+1;
+      st.groupByGrade[group] = st.groupByGrade[group] || {4:0,5:0,6:0};
+      st.groupByGrade[group][r.vip]++;
     });
   });
   return st;
@@ -1676,7 +1661,7 @@ function vipRate(closed, unproc){ const d = closed + unproc; return d > 0 ? clos
 
 function vipDelta(cur, prev, unit, pct){
   if (cur == null || prev == null) return `<div class="delta" style="color:var(--ink-dim);">비교 데이터 없음</div>`;
-  const diff = cur - prev;
+  const diff = pct ? cur - prev : Math.round(cur) - Math.round(prev);
   if (pct){
     const p = Math.round(diff*1000)/10;
     return `<div class="delta ${p>=0?'up':'down'}">${unit} ${p>=0?'▲':'▼'} ${Math.abs(p)}%p</div>`;
@@ -1684,7 +1669,7 @@ function vipDelta(cur, prev, unit, pct){
   const r = prev > 0 ? Math.round(diff/prev*100) : null;
   // 인입은 증가가 좋은 지표가 아니므로 중립색(증가=주황, 감소=회색)
   const col = diff > 0 ? "var(--accent)" : "var(--ink-dim)";
-  return `<div class="delta" style="color:${col};">${unit} ${diff>=0?'▲':'▼'} ${Math.abs(Math.round(diff*10)/10).toLocaleString()}건${r!=null?` (${diff>=0?'+':'-'}${Math.abs(r)}%)`:''}</div>`;
+  return `<div class="delta" style="color:${col};">${unit} ${diff>=0?'▲':'▼'} ${Math.abs(Math.round(diff)).toLocaleString()}건${r!=null?` (${diff>=0?'+':'-'}${Math.abs(r)}%)`:''}</div>`;
 }
 
 function renderVip(data){
@@ -1718,7 +1703,7 @@ function renderVip(data){
     return;
   }
 
-  const vipRows = rawLog.filter(r => r.direction === "INBOUND" && VIP_GRADES.includes(r.vip));
+  const vipRows = rawLog.filter(r => r.direction === "INBOUND" && VIP_GRADES.includes(r.vip) && r.agent); // 담당자 미배정 건은 제외
   const allDates = [...new Set(rawLog.map(r => r.date))].sort((a,b)=>vipMdKey(a)-vipMdKey(b));
   const workDates = allDates.filter(vipIsWorkday);
   const todayMD = vipTodayMD();
@@ -1773,7 +1758,7 @@ function renderVip(data){
     const curV = isDaily ? cur.g[g] : (curAvg ? curAvg.g[g] : null);
     const prevV = isDaily ? (prev ? prev.g[g] : null) : (prevAvg ? prevAvg.g[g] : null);
     return `<div class="kpi"><div class="label"><span class="grade-chip" style="background:${VIP_GRADE_COLORS[g]}"></span>VIP ${g}등급 ${isDaily?'인입':'일평균'}</div>
-      <div class="val">${isDaily ? fmtNum(curV) : (curV==null?'-':curV.toFixed(1))}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
+      <div class="val">${fmtNum(curV)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       ${isDaily ? '' : `<div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">기간 합계 ${fmtNum(cur.g[g])}건 · 비중 ${cur.total?Math.round(cur.g[g]/cur.total*100):0}%</div>`}
       ${vipDelta(curV, prevV, prevLabel)}</div>`;
   };
@@ -1783,7 +1768,7 @@ function renderVip(data){
         <div class="val" style="color:#F2C14E;">${fmtNum(cur.total)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
         ${isDaily ? vipDelta(cur.total, prev?prev.total:null, prevLabel) : `<div style="font-size:11.5px;color:var(--ink-dim);margin-top:6px;">${prevLabel.replace(' 대비','')} ${prev?fmtNum(prev.total):'-'}건</div>`}</div>
       ${isDaily ? '' : `<div class="kpi" style="border-color:#F2C14E66;"><div class="label">월~토 일평균 인입</div>
-        <div class="val" style="color:#F2C14E;">${curAvg?curAvg.total.toFixed(1):'-'}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건/일</span></div>
+        <div class="val" style="color:#F2C14E;">${curAvg?fmtNum(curAvg.total):'-'}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건/일</span></div>
         <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">영업일 ${curAvg?curAvg.days:0}일 기준${partial?' · 오늘 제외':''}</div>
         ${vipDelta(curAvg?curAvg.total:null, prevAvg?prevAvg.total:null, prevLabel)}</div>`}
       ${VIP_GRADES.map(gradeKpi).join("")}
@@ -1802,7 +1787,7 @@ function renderVip(data){
     weekdayTable = `
       <table style="margin-top:6px;">
         <tr><th>요일</th><th>일평균</th>${VIP_GRADES.map(g=>`<th>${g}등급</th>`).join("")}<th>집계일</th></tr>
-        ${rowsWd.map(r=>`<tr><td>${WEEKDAY_KO[r.wd]}요일</td><td class="${r.total===maxWd?'hl-warn':'hl-num'}">${r.total.toFixed(1)}</td>${r.g.map(v=>`<td>${v.toFixed(1)}</td>`).join("")}<td style="color:var(--ink-dim);">${r.n}일</td></tr>`).join("")}
+        ${rowsWd.map(r=>`<tr><td>${WEEKDAY_KO[r.wd]}요일</td><td class="${r.total===maxWd?'hl-warn':'hl-num'}">${fmtNum(r.total)}</td>${r.g.map(v=>`<td>${fmtNum(v)}</td>`).join("")}<td style="color:var(--ink-dim);">${r.n}일</td></tr>`).join("")}
       </table>`;
   }
 
@@ -1828,7 +1813,7 @@ function renderVip(data){
     <details style="margin-top:12px;"><summary style="cursor:pointer;font-size:13px;color:var(--ink-dim);">미처리 VIP 상담 ${unprocList.length}건 보기</summary>
       <table style="margin-top:8px;font-size:12.5px;">
         <tr><th>일자</th><th style="text-align:left;">사업장</th><th>등급</th><th>담당자</th><th>상태</th><th>링크</th></tr>
-        ${unprocList.slice(0,50).map(r=>`<tr><td>${dateLabel(r.date)} ${r.hour}시</td><td style="text-align:left;">${r.store||'-'}</td><td>${r.vip}등급</td><td>${r.agent||'미배정'}</td><td>${STATE_KO[(r.state||'').toLowerCase()]||r.state}</td><td>${r.url?`<a href="${r.url}" target="_blank" style="color:var(--accent);">열기</a>`:'-'}</td></tr>`).join("")}
+        ${unprocList.slice(0,50).map(r=>`<tr><td>${dateLabel(r.date)} ${r.hour}시</td><td style="text-align:left;">${r.store||'-'}</td><td>${r.vip}등급</td><td>${r.agent}</td><td>${STATE_KO[(r.state||'').toLowerCase()]||r.state}</td><td>${r.url?`<a href="${r.url}" target="_blank" style="color:var(--accent);">열기</a>`:'-'}</td></tr>`).join("")}
       </table>${unprocList.length>50?`<div style="font-size:11px;color:var(--ink-dim);margin-top:6px;">최근 50건만 표시</div>`:''}
     </details>` : `<div style="font-size:12.5px;color:var(--good);margin-top:10px;">미처리 VIP 상담이 없습니다.</div>`;
 
@@ -1848,17 +1833,20 @@ function renderVip(data){
 
   // ---- 4. 카테고리별 이슈 ----
   const groupRows = Object.entries(cur.groups).sort((a,b)=>b[1]-a[1]);
-  const detailRows = Object.entries(cur.details).sort((a,b)=>b[1]-a[1]).slice(0,12);
-  // 진행 중인 주·월은 전기간(완료)과 건수 비교가 왜곡되므로 비교 열 생략
-  const prevGroups = (prev && !partial) ? prev.groups : null;
+  const issueTotal = sum(groupRows.map(([,n])=>n));
+  const prevGroups = (prev && !partial) ? prev.groups : null; // 진행 중인 주·월은 비교 생략
+  const VIP_TIER = ["#E8A33D","#C9CDD6","#B08D57"];
+  const issueKpis = groupRows.length ? `<div class="kpis vip-kpis" style="margin-bottom:14px;">${groupRows.map(([gname,n],i)=>`
+      <div class="kpi"${i<3?` style="border-color:${VIP_TIER[i]}88;"`:''}><div class="label">${i+1}위 ${gname}</div>
+        <div class="val"${i<3?` style="color:${VIP_TIER[i]};"`:''}>${fmtNum(n)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
+        <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">비중 ${issueTotal?Math.round(n/issueTotal*100):0}%${prevGroups?` · ${prevLabel.replace(' 대비','')} ${fmtNum(prevGroups[gname]||0)}건`:''}</div></div>`).join("")}</div>`
+    : '<div style="color:var(--ink-dim);font-size:13px;">해당 기간 VIP 이슈 데이터가 없습니다.</div>';
   const issueTable = `
     <table>
-      <tr><th>이슈 유형</th><th>건수</th><th>비중</th>${VIP_GRADES.map(g=>`<th>${g}등급</th>`).join("")}${prevGroups?`<th>${prevLabel.replace(' 대비','')}</th>`:''}</tr>
-      ${groupRows.map(([gname,n])=>{ const p = prevGroups ? (prevGroups[gname]||0) : null; const diff = p==null?null:n-p; return `<tr>
-        <td style="color:var(--ink);font-weight:600;">${gname}</td><td class="hl-num">${n}</td><td style="color:var(--ink-dim);">${cur.total?Math.round(n/cur.total*100):0}%</td>
-        ${VIP_GRADES.map(g=>`<td>${cur.groupByGrade[gname][g]||0}</td>`).join("")}
-        ${prevGroups?`<td style="color:${diff>0?'var(--accent)':'var(--ink-dim)'};">${diff>0?'▲'+diff:diff<0?'▼'+Math.abs(diff):'-'}</td>`:''}</tr>`; }).join("")}
-      ${cur.untagged?`<tr><td>분류 태그 없음</td><td>${cur.untagged}</td><td style="color:var(--ink-dim);">${Math.round(cur.untagged/cur.total*100)}%</td>${VIP_GRADES.map(()=>'<td></td>').join("")}${prevGroups?'<td></td>':''}</tr>`:''}
+      <tr><th>이슈 유형</th><th>건수</th><th>비중</th>${VIP_GRADES.map(g=>`<th>${g}등급</th>`).join("")}</tr>
+      ${groupRows.map(([gname,n])=>`<tr>
+        <td style="color:var(--ink);font-weight:600;">${gname}</td><td class="hl-num">${fmtNum(n)}</td><td style="color:var(--ink-dim);">${issueTotal?Math.round(n/issueTotal*100):0}%</td>
+        ${VIP_GRADES.map(g=>`<td>${cur.groupByGrade[gname][g]||0}</td>`).join("")}</tr>`).join("")}
     </table>`;
 
   const periodName = isDaily ? "일간" : vipPeriod === "weekly" ? "주간" : "월간";
@@ -1880,20 +1868,22 @@ function renderVip(data){
 
     <div class="vip-sec"><span class="num">3</span>담당자별 처리 현황</div>
     <div class="grid2">
-      <div class="card"><h2>담당자별 VIP 인입·처리<span class="tag">songsong·미배정 포함</span></h2><div style="overflow-x:auto;">${agentTable}</div></div>
+      <div class="card"><h2>담당자별 VIP 인입·처리</h2><div style="overflow-x:auto;">${agentTable}</div></div>
       <div class="card"><h2>담당자별 인입<span class="tag">등급별 누적</span></h2><canvas id="vipChartAgent"></canvas></div>
     </div>
 
     <div class="vip-sec"><span class="num">4</span>카테고리별 이슈</div>
-    <div class="grid2">
-      <div class="card"><h2>세부 이슈 TOP ${detailRows.length}<span class="tag">파손·품질불량 등 소분류</span></h2><canvas id="vipChartDetail"></canvas></div>
-      <div class="card"><h2>이슈 유형별 인입</h2><div style="overflow-x:auto;">${issueTable}</div></div>
+    <div class="card" style="margin-bottom:16px;">
+      <h2>VIP 이슈 유형 랭킹<span class="tag">${title}</span></h2>
+      ${issueKpis}
+      <canvas id="vipChartIssue" style="max-height:240px;"></canvas>
     </div>
+    <div class="card" style="margin-bottom:16px;"><h2>이슈 유형별 등급 분포</h2><div style="overflow-x:auto;">${issueTable}</div></div>
 
     <div class="footer-note">
-      VIP 등급은 RAW 시트 DF열 "Tags"의 VIP_4~6등급 기준(현재 등급)이며, 인입은 direction=INBOUND 상담만 집계합니다.<br>
+      VIP 등급은 RAW 시트 DF열 "Tags"의 VIP_4~6등급 기준(현재 등급)이며, 담당자가 배정된 INBOUND 상담만 집계합니다(미배정 제외).<br>
       처리율 = 종료(closed) ÷ (종료 + 미처리[missed·opened·snoozed]) · 대기(initial)는 제외 · 일평균은 일요일·공휴일·당일을 제외한 월~토 영업일 기준입니다.<br>
-      이슈 유형은 상담 분류 tags 기준이며, 한 상담에 여러 분류가 있으면 각각 집계됩니다.
+      이슈 유형은 상담 분류 tags의 중분류(품질불량·공급사클레임·배송클레임·배송문의·서비스이용문의·주문결제) 기준이며, 부재·중복 등은 제외합니다.
     </div>`;
 
   // ---- 차트 ----
@@ -1928,14 +1918,17 @@ function renderVip(data){
     options: { indexAxis: "y", plugins:{ legend:{ position:"bottom", labels:{boxWidth:10} } },
       scales:{ x:{ stacked:true, beginAtZero:true, grid:{color:"#28324D"} }, y:{ stacked:true, grid:{display:false} } } }
   });
-  const detailColor = (lbl) => /파손/.test(lbl) ? "#F0555BCC" : /품질불량/.test(lbl) ? "#E8A33DCC" : /^배송/.test(lbl) ? "#4C6EF5CC" : /^공급사/.test(lbl) ? "#BE4BDBCC" : "#8B96ADAA";
-  const el4 = document.getElementById("vipChartDetail");
-  if (el4 && detailRows.length) charts.vipDetail = new Chart(el4, {
-    type: "bar",
-    data: { labels: detailRows.map(([l])=>l), datasets: [{ data: detailRows.map(([,n])=>n), backgroundColor: detailRows.map(([l])=>detailColor(l)), borderRadius: 4 }] },
-    options: { indexAxis: "y", plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: (i) => `${i.raw}건 (${cur.total?Math.round(i.raw/cur.total*100):0}%)` } } },
-      scales:{ x:{ beginAtZero:true, grid:{color:"#28324D"} }, y:{ grid:{display:false}, ticks:{font:{size:11}} } } }
-  });
+  const el4 = document.getElementById("vipChartIssue");
+  if (el4 && groupRows.length){
+    const pal = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC"];
+    charts.vipIssue = new Chart(el4, {
+      type: "bar",
+      data: { labels: groupRows.map(([g],i)=>`${i+1}위 ${g}`),
+        datasets: [{ data: groupRows.map(([,n])=>n), backgroundColor: groupRows.map((_,i)=> i<3 ? VIP_TIER[i] : pal[i%pal.length]+"AA"), borderRadius: 4 }] },
+      options: { indexAxis: "y", plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: (i) => `${i.raw}건 (${issueTotal?Math.round(i.raw/issueTotal*100):0}%)` } } },
+        scales:{ x:{ beginAtZero:true, grid:{color:"#28324D"} }, y:{ grid:{display:false} } } }
+    });
+  }
 }
 
 /* ===================== 렌더 ===================== */
