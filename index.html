@@ -99,6 +99,9 @@
 <script>
 /* ===================== 설정 ===================== */
 const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?output=csv";
+// CS_Tracking 실시간 값 (구글 "웹에 게시" 본은 수식 결과가 바뀌어도 갱신이 멈추는 경우가 있어 원본 시트를 직접 조회)
+// ※ 다른 탭(지연 체크·온보딩 등)은 이 방식에서 날짜/텍스트가 누락되므로 게시본을 그대로 사용
+const CS_LIVE_URL = "https://docs.google.com/spreadsheets/d/13CdbXC6aHSW0YMdZkGT1-pHjb4ang54gYco-TGBrK1o/gviz/tq?tqx=out:csv&headers=0&sheet=CS_Tracking";
 const SCHEDULE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTjti7FdTYQVky3fer7jhzdfQxh5AXJeFWNi-Nt6WkomVsBRbf-NsheB4KLnJ1EpYY97an7--YqNn7I/pub?gid=0&single=true&output=csv";
 const OUTCALL_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=25550252&single=true&output=csv";
 const DELAY30_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR/pub?gid=1307884512&single=true&output=csv";
@@ -713,12 +716,22 @@ async function fetchCSV(url){
   return res.text();
 }
 
+// 실시간 조회 우선 → 실패하거나 형식이 깨졌으면 게시본으로 대체
+async function loadCsTrackingText(){
+  try {
+    const live = await fetchCSV(CS_LIVE_URL + "&_t=" + Date.now());
+    const p = parseCSV(live);
+    if (p.dates && p.dates.length && p.sections && p.sections["상담인입"] && Object.keys(p.sections["상담인입"]).length) return live;
+    console.warn("CS_Tracking 실시간 조회 형식 이상 - 게시본 사용");
+  } catch(e){ console.warn("CS_Tracking 실시간 조회 실패 - 게시본 사용:", e.message); }
+  return fetchCSV(CSV_URL);
+}
 async function loadMainData(){
   // 모든 시트를 "동시에" 요청 (예전엔 하나씩 순서대로 받아서 6~7개 × 0.6초씩 대기가 누적됐음)
   const opt = (url, parser, fallback, name) => (url ? fetchCSV(url).then(parser) : Promise.resolve(fallback))
     .catch(e => { console.warn(name + " 시트를 불러오지 못했습니다:", e.message); return fallback; });
   const [csText, schedule, outcall, delay30, delayHold, onboardCalls, survey] = await Promise.all([
-    fetchCSV(CSV_URL),
+    loadCsTrackingText(),
     opt(SCHEDULE_CSV_URL, parseSchedule, { dates: [], schedule: {}, minStaff: {}, totalStaff: {}, issueStatus: {} }, "스케줄"),
     opt(OUTCALL_CSV_URL, parseOutCall, { dates: [], categories: [], data: {} }, "Out Call_Tracking"),
     opt(DELAY30_CSV_URL, parseDelayRows, [], "30분 지연 체크"),
