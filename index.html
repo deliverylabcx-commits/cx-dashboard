@@ -1613,11 +1613,12 @@ const COST_PUB_BASE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ5HGZSXx
 const COST_RAW_URL = COST_PUB_BASE + "?gid=0&single=true&output=csv";          // RAW: feature·quantity·checkout*·startAt·endAt·항목
 const COST_ETC_URL = COST_PUB_BASE + "?gid=1372132577&single=true&output=csv"; // ETC: 카테고리·카테고리2·계약차감·금액(단가, 1원 단위)
 const COST_DEDUCT_FROM = "2026-08-01"; // 계약차감(무료 제공량) 적용 시작일 - 이 날짜 이후 시작하는 정산분부터 차감
-const COST_PRICE_OVERRIDE = { frontAlf: 1 }; // ALF는 충전 금액(원) 단위 사용량 → 1원으로 책정 (ETC 탭 단가보다 우선)
+const COST_PRICE_OVERRIDE = { frontAlf: 1, operator: 120000 }; // ALF는 충전 금액(원) 단위 사용량 → 1원으로 책정 (ETC 탭 단가보다 우선)
 const COST_MONTHLY_PLAN = { frontAlf: { from: "2026-10", to: "2026-11" } }; // ALF 월결제 기간(정산 시작월 기준) - 표에 "월결제" 표시
 const COST_ALF_AU_PER_CHAT = 500; // 고객 ALF: 상담 참여 1건당 500AU (1AU=1원) - 채널톡 청구서 항목별 안내
 const COST_MONTH_NOTES = { "2026-07": "채널톡 전산 이슈로 일부 항목 미확인 (확인 후 RAW 보완 예정)" };
-const COST_ADJ_MAX_DAYS = 6; // 정산 기간이 이 일수 이하인 구간(요금제 변경 일할 정산 등)은 "조정분"으로 분리 - 카테고리 추이에서 제외, 총비용에는 포함
+const COST_ADJ_MAX_DAYS = 6;
+const COST_INCLUDED_QTY = { operator: 8 }; // 오퍼레이터 시트: 8석까지는 기본 포함, 초과 1석당 120,000원 과금 (전 기간 공통) // 정산 기간이 이 일수 이하인 구간(요금제 변경 일할 정산 등)은 "조정분"으로 분리 - 카테고리 추이에서 제외, 총비용에는 포함
 const COST_COLORS = { xms:"#4C6EF5", workflow:"#E8A33D", sns:"#12B886", mu:"#5C677D", marketing:"#BE4BDB", manager:"#8B96AD", callUsage:"#F76707", callNumber:"#66D9E8", operator:"#A9E34B", frontAlf:"#F0555B" };
 let costData = null, costLoading = false, costError = null, costSelMonth = null, costTableMode = "cost";
 
@@ -1657,7 +1658,10 @@ function parseCostRaw(text, etc){
     out.push({ feature, name: e.name, ym: startAt.slice(0,7), startAt, endAt, days, adj, usage, quantity: costNum(r[col("quantity")]),
       reserved: costNum(r[col("checkoutOnReserved")]), onDemand: costNum(r[col("checkoutOnDemand")]),
       // 비용은 단순하게 "최종 사용량 × 단가" (무료/충전 구분 없음). 계약차감은 참고 지표로만 보관
-      deduct, billable, price: e.price, cost: usage * e.price, saved: freeUsed * e.price, postCost: 0, preCost: 0 });
+      deduct: COST_INCLUDED_QTY[feature] != null ? 0 : deduct, billable, price: e.price,
+      included: COST_INCLUDED_QTY[feature] || 0,
+      cost: Math.max(0, usage - (COST_INCLUDED_QTY[feature] || 0)) * e.price,
+      saved: COST_INCLUDED_QTY[feature] != null ? 0 : freeUsed * e.price, postCost: 0, preCost: 0 });
   });
   return out;
 }
@@ -1751,7 +1755,7 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
       <div class="kpi" style="border-color:${topUp?'#F0555B66':'var(--line)'};"><div class="label">전월 대비 최대 증가 카테고리</div>
         <div class="val" style="font-size:22px;color:${topUp?'var(--bad)':'var(--ink-dim)'};">${topUp?topUp.name:'증가 항목 없음'}</div>
         ${topUp?`<div class="delta" style="color:var(--bad);">▲ ${fmtWon(topUp.d)}${pctTxt(topUp.d, topUp.prev, topUp)}</div>${topUp.reasons.length?`<div style="font-size:11px;color:var(--accent);margin-top:3px;">※ ${topUp.reasons.join(" · ")}</div>`:''}`:''}</div>
-      <div class="kpi" style="opacity:.85;"><div class="label">참고 · 계약 무료 제공분</div><div class="val" style="font-size:21px;color:var(--ink-dim);">${mSaved(sel)?fmtWon(mSaved(sel)):'-'}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">무료 부가서비스(워크플로우·마케팅·오퍼레이터) 환산 · 비용엔 미반영</div></div>
+      <div class="kpi" style="opacity:.85;"><div class="label">참고 · 계약 무료 제공분</div><div class="val" style="font-size:21px;color:var(--ink-dim);">${mSaved(sel)?fmtWon(mSaved(sel)):'-'}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">무료 부가서비스(워크플로우·마케팅) 환산 · 비용엔 미반영</div></div>
       <div class="kpi"><div class="label">CS 1건당 채널톡 비용</div><div class="val">${fmtWon(perSel)}</div>
         <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">${inbSel?`같은 기간 CS 인입 ${fmtNum(inbSel)}건`:'CS 인입 데이터(6/29~) 없는 기간'}</div>${perSel!=null&&perPrev!=null?dlt(perSel, perPrev):''}</div>
       <div class="kpi"><div class="label">${yr}년 누적 비용</div><div class="val">${fmtWon(ytd)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">${costYmLabel(months[0])}~${costYmLabel(sel)} 정산 · 월평균 ${fmtWon(ytd/months.filter(m=>m.startsWith(yr)&&m<=sel).length)}</div></div>
@@ -1782,7 +1786,7 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
       ${detailRows.map(({f,a,p}) => { const d = p ? a.cost - p.cost : (prev ? a.cost : null); return `<tr>
         <td><span class="grade-chip" style="background:${COST_COLORS[f]||'#8B96AD'}"></span><span style="color:var(--ink);font-weight:600;">${nameOf(f)}</span>${planTag(f, sel)}</td>
         <td style="color:var(--ink-dim);">${fmtNum(a.actual)}${f==="frontAlf"&&a.actual?`<div style="font-size:10.5px;">상담 ${fmtNum(a.actual/COST_ALF_AU_PER_CHAT)}건</div>`:''}</td><td>${fmtNum(a.usage)}</td>
-        <td style="color:var(--ink-dim);">${fmtWon(a.price)}</td><td class="hl-num">${fmtWon(a.cost)}</td><td style="color:var(--ink-dim);">${curT?Math.round(a.cost/curT*100):0}%</td>
+        <td style="color:var(--ink-dim);">${fmtWon(a.price)}${COST_INCLUDED_QTY[f]?`<div style="font-size:10.5px;">${COST_INCLUDED_QTY[f]}석 초과분만</div>`:''}</td><td class="hl-num">${fmtWon(a.cost)}</td><td style="color:var(--ink-dim);">${curT?Math.round(a.cost/curT*100):0}%</td>
         ${prev?`<td>${fmtWon(p?.cost||0)}</td><td style="font-weight:700;color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">${!d?'-':(d>0?'▲ ':'▼ ')+fmtWon(Math.abs(d))}</td>`:''}<td style="font-size:11.5px;color:var(--ink-dim);">${a.deduct?`${fmtNum(Math.min(a.usage,a.deduct))} / ${fmtNum(a.deduct)} (${fmtWonShort(a.saved)})`:'-'}</td></tr>`; }).join("")}
       ${adjBy[sel] || (prev && adjBy[prev]) ? `<tr><td><span class="grade-chip" style="background:#5C677D"></span><span style="color:var(--ink);font-weight:600;">요금제 변경 정산(조정)</span><div style="font-size:10.5px;color:var(--ink-dim);">${[...new Set((adjBy[sel]?.rows||[]).map(r=>`${costMD(r.startAt)}~${costMD(r.endAt)}`))].join(", ")||'-'}</div></td>
         <td colspan="3" style="font-size:11px;color:var(--ink-dim);text-align:left;">${(adjBy[sel]?.rows||[]).filter(r=>r.cost>0).map(r=>`${nameOf(r.feature)} ${fmtWon(r.cost)}`).join(" · ")||'-'}</td>
@@ -1799,11 +1803,11 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
       <tr><th>카테고리</th>${months.map(m=>`<th style="${m===sel?'color:var(--ink);':''}">${costYmLabel(m)}${COST_MONTH_NOTES[m]?`<span title="${COST_MONTH_NOTES[m]}" style="color:var(--accent);cursor:help;"> ※</span>`:''}</th>`).join("")}<th>${isCost?'합계':'월평균'}</th></tr>
       ${(isCost ? costFeats : feats).map(f => `<tr><td><span class="grade-chip" style="background:${COST_COLORS[f]||'#8B96AD'}"></span><span style="color:var(--ink);">${nameOf(f)}</span></td>
         ${months.map((m,i) => { const v = val(m,f), pv = i>0 ? val(months[i-1],f) : null; const up = v!=null && pv!=null && v > pv; const dn = v!=null && pv!=null && v < pv;
-          return `<td style="${m===sel?'background:var(--panel-2);':''}${up?'color:var(--bad);':dn?'color:var(--good);':''}">${v==null?'<span style="color:var(--ink-dim);">-</span>':(isCost?fmtWonShort(v):fmtNum(v))}${up?' ▲':dn?' ▼':''}${isPlan(f,m)?'<div style="font-size:9.5px;color:#F2C14E;">월결제</div>':''}</td>`; }).join("")}
-        <td class="hl-num">${isCost?fmtWonShort(sum(months.map(m=>val(m,f)||0))):(()=>{ const vs = months.map(m=>val(m,f)).filter(v=>v!=null); return vs.length ? fmtNum(sum(vs)/vs.length) : '-'; })()}</td></tr>`).join("")}
-      ${isCost && Object.keys(adjBy).length ? `<tr><td><span class="grade-chip" style="background:#5C677D"></span><span style="color:var(--ink);">요금제 변경 정산(조정)</span></td>${months.map(m=>`<td style="${m===sel?'background:var(--panel-2);':''}">${mAdj(m)?fmtWonShort(mAdj(m)):'<span style="color:var(--ink-dim);">-</span>'}</td>`).join("")}<td class="hl-num">${fmtWonShort(sum(months.map(mAdj)))}</td></tr>` : ''}
-      ${isCost?`<tr style="border-top:2px solid var(--line);"><td style="color:var(--ink);font-weight:700;">합계</td>${months.map(m=>`<td class="hl-num" style="${m===sel?'background:var(--panel-2);':''}">${fmtWonShort(mTotal(m))}</td>`).join("")}<td class="hl-num">${fmtWonShort(sum(months.map(mTotal)))}</td></tr>
-      <tr><td>전월 대비</td>${months.map((m,i)=>{ if(!i) return '<td>-</td>'; const d = mTotal(m)-mTotal(months[i-1]); return `<td style="font-weight:700;color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">${d>0?'▲':d<0?'▼':''}${fmtWonShort(Math.abs(d))}</td>`; }).join("")}<td></td></tr>
+          return `<td style="${m===sel?'background:var(--panel-2);':''}${up?'color:var(--bad);':dn?'color:var(--good);':''}">${v==null?'<span style="color:var(--ink-dim);">-</span>':(isCost?fmtNum(v):fmtNum(v))}${up?' ▲':dn?' ▼':''}${isPlan(f,m)?'<div style="font-size:9.5px;color:#F2C14E;">월결제</div>':''}</td>`; }).join("")}
+        <td class="hl-num">${isCost?fmtNum(sum(months.map(m=>val(m,f)||0))):(()=>{ const vs = months.map(m=>val(m,f)).filter(v=>v!=null); return vs.length ? fmtNum(sum(vs)/vs.length) : '-'; })()}</td></tr>`).join("")}
+      ${isCost && Object.keys(adjBy).length ? `<tr><td><span class="grade-chip" style="background:#5C677D"></span><span style="color:var(--ink);">요금제 변경 정산(조정)</span></td>${months.map(m=>`<td style="${m===sel?'background:var(--panel-2);':''}">${mAdj(m)?fmtNum(mAdj(m)):'<span style="color:var(--ink-dim);">-</span>'}</td>`).join("")}<td class="hl-num">${fmtNum(sum(months.map(mAdj)))}</td></tr>` : ''}
+      ${isCost?`<tr style="border-top:2px solid var(--line);"><td style="color:var(--ink);font-weight:700;">합계</td>${months.map(m=>`<td class="hl-num" style="${m===sel?'background:var(--panel-2);':''}">${fmtNum(mTotal(m))}</td>`).join("")}<td class="hl-num">${fmtNum(sum(months.map(mTotal)))}</td></tr>
+      <tr><td>전월 대비</td>${months.map((m,i)=>{ if(!i) return '<td>-</td>'; const d = mTotal(m)-mTotal(months[i-1]); return `<td style="font-weight:700;color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">${d>0?'▲':d<0?'▼':''}${fmtNum(Math.abs(d))}</td>`; }).join("")}<td></td></tr>
       <tr><td>정산 기간</td>${months.map(m=>`<td style="font-size:11px;color:var(--ink-dim);">${mPeriods(m)}</td>`).join("")}<td></td></tr>`:''}
     </table>`;
 
@@ -1812,13 +1816,13 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
     ${changeCard}
     <div class="card" style="margin-bottom:16px;"><h2>월별 비용 흐름<span class="tag">카테고리별 비용(누적 막대) · 총비용(선)</span></h2><canvas id="costChartFlow"></canvas></div>
     <div class="card" style="margin-bottom:16px;">
-      <h2>카테고리별 월별 요약<span class="tag">▲▼ 전월 대비</span></h2>
+      <h2>카테고리별 월별 요약<span class="tag">▲▼ 전월 대비 · ${isCost?'단위: 원':'단위: 사용량'}</span></h2>
       <div class="seg" style="margin-bottom:12px;"><button class="${isCost?'on':''}" onclick="setCostTable('cost')">비용</button><button class="${!isCost?'on':''}" onclick="setCostTable('usage')">최종 사용량</button></div>
       <div style="overflow-x:auto;">${summaryTable}</div>
     </div>
     <div class="card" style="margin-bottom:16px;"><h2>${costYmLabel(sel)} 정산 카테고리 상세<span class="tag">${mPeriods(sel)}${prev?` · ${costYmLabel(prev)} 정산 대비`:''}</span></h2><div style="overflow-x:auto;">${detailTable}</div></div>
     <div class="footer-note">
-      비용 = 최종 사용량(checkoutTotal) × 단가(ETC 탭 "금액", 1원 단위) · 무료 제공·충전 구분 없이 단순 집계해 전월 대비 증감만 봅니다.<br>
+      비용 = 최종 사용량(checkoutTotal) × 단가(ETC 탭 "금액", 1원 단위) · 오퍼레이터 시트만 8석까지 기본 포함, 초과 1석당 120,000원 · 무료 제공·충전 구분 없이 단순 집계해 전월 대비 증감만 봅니다.<br>
       "참고 · 계약 무료"는 2026년 8월 이후 정산분의 계약차감(무료 부가서비스) 사용량과 그 환산 금액이며, 비용에는 반영하지 않습니다. 7월 정산은 채널톡 전산 이슈로 일부 항목이 확인되지 않은 상태입니다.<br>
       월은 정산 시작일(startAt) 기준입니다. ${COST_ADJ_MAX_DAYS}일 이하 짧은 정산 구간(8/11~8/12 요금제 변경 등)은 "요금제 변경 정산(조정)"으로 분리해 총비용에만 포함하고, 카테고리별 사용량·증감에서는 제외합니다.<br>
       ALF는 충전 금액 단위라 1원으로 책정하며, ${COST_MONTHLY_PLAN.frontAlf.from.slice(5)*1}~${COST_MONTHLY_PLAN.frontAlf.to.slice(5)*1}월 정산분은 월결제로 표시합니다. CS 1건당 비용은 같은 정산 기간의 CS 인입(메인 RAW) 기준입니다.
