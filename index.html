@@ -1734,10 +1734,14 @@ function renderCost(data){
 
   // 전월 대비 카테고리 증감
   const diffs = prev ? feats.map(f => { const c = agg[sel]?.[f], p = agg[prev]?.[f];
-      return { f, name: nameOf(f), cur: c?.cost||0, prev: p?.cost||0, d: (c?.cost||0)-(p?.cost||0), uc: c?.usage||0, up: p?.usage||0 }; })
+      // 증감 사유: 계약차감 시작/종료, 전월 데이터 미확인(전산 이슈) 등 - 사용량과 비용 방향이 다를 때 설명용
+      const reasons = [];
+      if ((c?.deduct||0) > 0 && !(p?.deduct)) reasons.push(`계약차감 시작 (${fmtNum(c.deduct)} 무료 → 과금 대상 ${fmtNum(c.billable)})`);
+      if (!p && COST_MONTH_NOTES[prev]) reasons.push(`${costYmLabel(prev)} 데이터 미확인`);
+      return { f, name: nameOf(f), cur: c?.cost||0, prev: p?.cost||0, d: (c?.cost||0)-(p?.cost||0), uc: c?.usage||0, up: p?.usage||0, hasPrev: !!p, reasons }; })
     .filter(x => x.cur || x.prev) : [];
   const ups = diffs.filter(x=>x.d>0).sort((a,b)=>b.d-a.d), downs = diffs.filter(x=>x.d<0).sort((a,b)=>a.d-b.d);
-  const pctTxt = (d, p) => p > 0 ? ` (${d>=0?'+':'-'}${Math.abs(Math.round(d/p*100))}%)` : (d>0 ? " (신규)" : "");
+  const pctTxt = (d, p, x) => p > 0 ? ` (${d>=0?'+':'-'}${Math.abs(Math.round(d/p*100))}%)` : (d>0 ? (x && !x.hasPrev && COST_MONTH_NOTES[prev] ? "" : " (신규)") : "");
   const dlt = (cur, pv) => {
     if (cur == null || pv == null) return `<div class="delta" style="color:var(--ink-dim);">비교 데이터 없음</div>`;
     const d = cur - pv; return `<div class="delta" style="color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">전월 대비 ${d>0?'▲':d<0?'▼':''} ${fmtWon(Math.abs(d))}${pctTxt(d,pv)}</div>`;
@@ -1749,7 +1753,7 @@ function renderCost(data){
         <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">후불 청구 ${fmtWon(mPost(sel))} · 충전금 사용 ${fmtWon(mPre(sel))}</div>${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var(--accent);margin-top:4px;">※ ${COST_MONTH_NOTES[sel]}</div>`:''}</div>
       <div class="kpi" style="border-color:${topUp?'#F0555B66':'var(--line)'};"><div class="label">전월 대비 최대 증가 카테고리</div>
         <div class="val" style="font-size:22px;color:${topUp?'var(--bad)':'var(--ink-dim)'};">${topUp?topUp.name:'증가 항목 없음'}</div>
-        ${topUp?`<div class="delta" style="color:var(--bad);">▲ ${fmtWon(topUp.d)}${pctTxt(topUp.d, topUp.prev)}</div>`:''}</div>
+        ${topUp?`<div class="delta" style="color:var(--bad);">▲ ${fmtWon(topUp.d)}${pctTxt(topUp.d, topUp.prev, topUp)}</div>${topUp.reasons.length?`<div style="font-size:11px;color:var(--accent);margin-top:3px;">※ ${topUp.reasons.join(" · ")}</div>`:''}`:''}</div>
       <div class="kpi"><div class="label">계약차감 절감액</div><div class="val" style="color:var(--good);">${fmtWon(mSaved(sel))}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">무료 제공량 사용분 × 단가 (8월~)</div></div>
       <div class="kpi"><div class="label">CS 1건당 채널톡 비용</div><div class="val">${fmtWon(perSel)}</div>
         <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">${inbSel?`같은 기간 CS 인입 ${fmtNum(inbSel)}건`:'CS 인입 데이터(6/29~) 없는 기간'}</div>${perSel!=null&&perPrev!=null?dlt(perSel, perPrev):''}</div>
@@ -1758,8 +1762,9 @@ function renderCost(data){
 
   const diffList = (arr, up) => arr.slice(0,5).map(x => `
     <li style="display:flex;justify-content:space-between;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);">
-      <span><b style="color:var(--ink);">${x.name}</b> <span style="color:var(--ink-dim);font-size:12px;">사용량 ${fmtNum(x.up)} → ${fmtNum(x.uc)}</span></span>
-      <span style="font-weight:800;color:${up?'var(--bad)':'var(--good)'};white-space:nowrap;">${up?'▲':'▼'} ${fmtWon(Math.abs(x.d))}${pctTxt(x.d, x.prev)}</span></li>`).join("") || `<li style="padding:9px 2px;color:var(--ink-dim);">해당 없음</li>`;
+      <span><b style="color:var(--ink);">${x.name}</b> <span style="color:var(--ink-dim);font-size:12px;">사용량 ${x.hasPrev?fmtNum(x.up):'-'} → ${fmtNum(x.uc)}${x.hasPrev && x.uc!==x.up ? ` <span style="color:${x.uc>x.up?'var(--accent)':'var(--ink-dim)'};">(${x.uc>x.up?'▲':'▼'})</span>`:''}</span>
+        ${x.reasons.length?`<div style="font-size:11px;color:var(--accent);margin-top:2px;">※ ${x.reasons.join(" · ")}</div>`:''}</span>
+      <span style="font-weight:800;color:${up?'var(--bad)':'var(--good)'};white-space:nowrap;">${up?'▲':'▼'} ${fmtWon(Math.abs(x.d))}${pctTxt(x.d, x.prev, x)}</span></li>`).join("") || `<li style="padding:9px 2px;color:var(--ink-dim);">해당 없음</li>`;
   const changeCard = prev ? `
     <div class="card" style="margin-bottom:16px;">
       <h2>전월 대비 카테고리 증감<span class="tag">${costYmLabel(prev)} → ${costYmLabel(sel)} 정산 · 비용 기준</span></h2>
