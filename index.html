@@ -658,7 +658,7 @@ function parseOnboardCalls(text){
 function parseRawLog(text){
   const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
   const rows = parsed.data;
-  const headerIdx = rows.findIndex(r => r.includes("createdAt"));
+  const headerIdx = rows.findIndex(r => r.some(c => (c||"").trim() === "createdAt"));
   if (headerIdx < 0) return [];
   const header = rows[headerIdx].map(h => (h||"").trim());
   const idx = {
@@ -682,7 +682,7 @@ function parseRawLog(text){
   // 채널톡 URL: 헤더 "url" 우선 (경량 RAW 탭 대응), 없으면 기존 98번째 컬럼(CT)
   const urlByName = header.findIndex(h => (h||"").toLowerCase() === "url");
   const URL_COL_INDEX = urlByName >= 0 ? urlByName : 97;
-  const createdAtRe = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/;
+  const createdAtRe = /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})$/; // 오전 0~9시는 "6:00:54"처럼 한 자리로 들어옴
   const out = [];
   for (let r = headerIdx + 1; r < rows.length; r++){
     const row = rows[r];
@@ -742,7 +742,15 @@ async function loadMainData(){
   return { ...parseCSV(csText), schedule, outcall, delay30, delayHold, onboardCalls, survey };
 }
 
+// RAW: 원본 시트 실시간 조회(필요한 11개 열만) 우선 → 실패 시 게시본(RAW_대시보드 탭)
+// 웹 게시본은 수식 탭이라 갱신이 멈추는 경우가 있어(10/15 이후 미반영 사례) 실시간 조회를 기본으로 사용
+const RAWLOG_LIVE_URL = "https://docs.google.com/spreadsheets/d/13CdbXC6aHSW0YMdZkGT1-pHjb4ang54gYco-TGBrK1o/gviz/tq?tqx=out:csv&gid=0&tq=" + encodeURIComponent("select B,F,H,I,J,L,X,AK,CT,DD,DF");
 async function loadRawLog(){
+  try {
+    const live = parseRawLog(await fetchCSV(RAWLOG_LIVE_URL + "&_t=" + Date.now()));
+    if (live.length && live.hasVipTags) return live;
+    console.warn("RAW 실시간 조회 형식 이상 - 게시본 사용");
+  } catch(e){ console.warn("RAW 실시간 조회 실패 - 게시본 사용:", e.message); }
   try { return parseRawLog(await fetchCSV(RAWLOG_CSV_URL)); }
   catch(e){ console.warn("RAW 로그 시트를 불러오지 못했습니다 (시간대별 분석 제외):", e.message); return []; }
 }
