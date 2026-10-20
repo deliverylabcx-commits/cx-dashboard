@@ -314,7 +314,7 @@ function buildMboDetailCardHTML(agent, d, periodLabel){
   `;
 }
 const STATE_LABELS = { closed:"종료", missed:"미처리 상담", initial:"인입 대기", opened:"처리중", snoozed:"보류" };
-const REFRESH_MS = 3 * 60 * 1000; // 3분마다 자동 갱신 (CS/스케줄/아웃콜/지연 시트)
+const REFRESH_MS = 5 * 60 * 1000; // 5분마다 시트 변경 여부만 확인 → 실제로 바뀐 경우에만 화면 갱신
 const RAWLOG_REFRESH_MS = 30 * 60 * 1000; // RAW 로그는 용량이 커서 30분마다만 갱신
 const HEADER_ROW = 3; // 0-indexed row containing 담당자/ETC + 실제 M/D 날짜
 const KNOWN_SECTIONS = ["상담인입","상담완료","상담처리율_%","상담완료율_%","30분 이상 지연","CPH(생산성)","Cast(평점)","카테고리별 이슈","부재율"];
@@ -716,8 +716,26 @@ async function fetchCSV(url){
   return res.text();
 }
 
+// 같은 스프레드시트(CS_Tracking 파일)의 탭은 "웹에 게시"본 대신 내보내기(export) 주소로 실시간 조회
+// (게시본은 수식 결과가 바뀌어도 갱신이 멈추는 경우가 있음 - 10/16 이후 아웃콜·지연·온보딩 미반영 사례). 실패 시 게시본으로 대체
+const MAIN_SHEET_ID = "13CdbXC6aHSW0YMdZkGT1-pHjb4ang54gYco-TGBrK1o";
+const MAIN_PUB_KEY = "2PACX-1vRMH_aldIZFeAf8wQJYSdZjnRVdn-WrXt2j3Yw984DdJf1It0FPyRCruUyE1Vli6mDMeuCtev_52_LR";
+async function fetchSheetLive(pubUrl){
+  const gid = (pubUrl.match(/gid=(\d+)/)||[])[1];
+  if (gid && pubUrl.includes(MAIN_PUB_KEY)){
+    try { return await fetchCSV(`https://docs.google.com/spreadsheets/d/${MAIN_SHEET_ID}/export?format=csv&gid=${gid}&_t=${Date.now()}`); }
+    catch(e){ console.warn("실시간 조회 실패 - 게시본 사용:", gid, e.message); }
+  }
+  return fetchCSV(pubUrl);
+}
 // 실시간 조회 우선 → 실패하거나 형식이 깨졌으면 게시본으로 대체
+const CS_EXPORT_URL = `https://docs.google.com/spreadsheets/d/13CdbXC6aHSW0YMdZkGT1-pHjb4ang54gYco-TGBrK1o/export?format=csv&gid=643666780`; // CS_Tracking 원본 그대로(실시간)
 async function loadCsTrackingText(){
+  try {
+    const t = await fetchCSV(CS_EXPORT_URL + "&_t=" + Date.now());
+    const p = parseCSV(t);
+    if (p.dates && p.dates.length && p.sections && p.sections["상담인입"] && Object.keys(p.sections["상담인입"]).length) return t;
+  } catch(e){ console.warn("CS_Tracking 내보내기 조회 실패 - 대체 경로 사용:", e.message); }
   try {
     const live = await fetchCSV(CS_LIVE_URL + "&_t=" + Date.now());
     const p = parseCSV(live);
@@ -728,7 +746,7 @@ async function loadCsTrackingText(){
 }
 async function loadMainData(){
   // 모든 시트를 "동시에" 요청 (예전엔 하나씩 순서대로 받아서 6~7개 × 0.6초씩 대기가 누적됐음)
-  const opt = (url, parser, fallback, name) => (url ? fetchCSV(url).then(parser) : Promise.resolve(fallback))
+  const opt = (url, parser, fallback, name) => (url ? fetchSheetLive(url).then(parser) : Promise.resolve(fallback))
     .catch(e => { console.warn(name + " 시트를 불러오지 못했습니다:", e.message); return fallback; });
   const [csText, schedule, outcall, delay30, delayHold, onboardCalls, survey] = await Promise.all([
     loadCsTrackingText(),
@@ -2888,11 +2906,11 @@ function render(data){
     </div>
 
     <div class="footer-note">
-      데이터 출처: CS_Tracking · 근무 스케줄 · Out Call_Tracking · 30분 지연 체크 · 응대지연_보류 (Google Sheets 웹 게시 CSV) · ${REFRESH_MS/60000}분마다 자동 갱신 · 일요일은 휴무로 인입 0건 처리됨 · 상단 날짜 선택기로 과거 특정일 조회 가능.
+      데이터 출처: CS_Tracking · 근무 스케줄 · Out Call_Tracking · 30분 지연 체크 · 응대지연_보류 (Google Sheets 실시간 조회) · ${REFRESH_MS/60000}분마다 변경 여부 확인 후 바뀐 경우에만 화면 갱신 · 일요일은 휴무로 인입 0건 처리됨 · 상단 날짜 선택기로 과거 특정일 조회 가능.
     </div>
   `;
 
-  document.getElementById("refreshBtn").onclick = () => { refresh(true); refreshRawLog(); };
+  document.getElementById("refreshBtn").onclick = () => { refresh(true); refreshRawLog(true); };
 
   const workingAgentsToday = agents.filter(a => { const st = schedule?.schedule?.[a]?.[today]; return !(st && OFF_STATUSES.includes(st)); });
   const targetCompletedToday = workingAgentsToday.length
@@ -4431,16 +4449,24 @@ function buildAgentDetailHTML(agent){
 }
 
 /* ===================== 갱신 로직 ===================== */
-let secondsLeft = REFRESH_MS/1000;
-function startCountdown(){
-  clearInterval(countdownTimer);
-  secondsLeft = REFRESH_MS/1000;
-  countdownTimer = setInterval(() => {
-    secondsLeft--;
-    const el = document.getElementById("lastUpdated");
-    if (el) el.textContent = `다음 자동 갱신까지 ${Math.max(0,secondsLeft)}초`;
-    if (secondsLeft <= 0) refresh(false);
-  }, 1000);
+// 원칙: 화면은 "데이터가 실제로 바뀌었을 때만" 다시 그린다. 주기적으로 시트를 확인하되 변경이 없으면 화면을 건드리지 않음.
+let lastCheckedAt = null, lastChangedAt = null, mainRefreshing = false, rawRefreshing = false, mainSig = null, rawSig = null, firstPaintDone = false;
+function hhmm(d){ return d ? d.toLocaleTimeString("ko-KR", { hour:"2-digit", minute:"2-digit" }) : "-"; }
+function updateStatusLabel(){
+  const el = document.getElementById("lastUpdated");
+  if (el) el.textContent = `최근 확인 ${hhmm(lastCheckedAt)} · 데이터 반영 ${hhmm(lastChangedAt)} (변경 시에만 화면 갱신)`;
+}
+function startCountdown(){ updateStatusLabel(); } // (구 카운트다운) - 렌더 때 상태 문구만 갱신
+function sigOf(str){ let h = 0; for (let i = 0; i < str.length; i++){ h = (h * 31 + str.charCodeAt(i)) | 0; } return str.length + ":" + h; }
+function rawSigOf(rawLog){ return sigOf(rawLog.map(r => r.date + r.hour + r.agent + r.state + r.vip).join("|")); }
+// 백그라운드 갱신: 스크롤 위치 유지 + 그래프 애니메이션 없이 조용히 교체
+function quietRender(){
+  if (!lastLoadedData) return;
+  const y = window.scrollY;
+  const prevAnim = Chart.defaults.animation;
+  Chart.defaults.animation = false;
+  try { render(lastLoadedData); } finally { Chart.defaults.animation = prevAnim; }
+  window.scrollTo(0, y);
 }
 
 /* ---- 브라우저 캐시 (IndexedDB): 재방문 시 직전 데이터를 즉시 표시하고, 최신 데이터는 뒤에서 받아 교체 ---- */
@@ -4465,56 +4491,78 @@ async function cacheSet(key, val){
 }
 
 async function refresh(manual){
+  if (mainRefreshing) return;
+  mainRefreshing = true;
   try{
     const main = await loadMainData();
-    const rawLog = lastLoadedData?.rawLog || [];
-    lastLoadedData = { ...main, rawLog };
-    render(lastLoadedData);
-    cacheSet("main", main);
+    const sig = sigOf(JSON.stringify(main));
+    lastCheckedAt = new Date();
+    if (manual || sig !== mainSig){
+      mainSig = sig; lastChangedAt = new Date();
+      lastLoadedData = { ...main, rawLog: lastLoadedData?.rawLog || [] };
+      manual ? render(lastLoadedData) : quietRender();
+      cacheSet("main", main);
+    }
   }catch(e){
     console.error(e);
     if (manual && !lastLoadedData) alert("데이터를 불러오지 못했습니다: " + e.message);
-  }
+  }finally{ mainRefreshing = false; updateStatusLabel(); }
 }
 
-async function refreshRawLog(){
-  const rawLog = await loadRawLog();
-  if (!rawLog.length && lastLoadedData?.rawLog?.length) return; // 실패 시 기존(캐시) 데이터 유지
-  if (lastLoadedData){
-    lastLoadedData.rawLog = rawLog;
-    render(lastLoadedData);
-  }
-  cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
-  return rawLog;
+async function refreshRawLog(manual){
+  if (rawRefreshing) return;
+  rawRefreshing = true;
+  try {
+    const rawLog = await loadRawLog();
+    if (!rawLog.length && lastLoadedData?.rawLog?.length) return; // 실패 시 기존 데이터 유지
+    const sig = rawSigOf(rawLog);
+    if (manual || sig !== rawSig){
+      rawSig = sig; lastChangedAt = new Date();
+      if (lastLoadedData){ lastLoadedData.rawLog = rawLog; manual ? render(lastLoadedData) : quietRender(); }
+      cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
+    }
+    return rawLog;
+  } finally { rawRefreshing = false; updateStatusLabel(); }
 }
 
 async function initialLoad(){
   // 1) RAW(대용량)와 메인 시트를 동시에 요청 시작
   const rawPromise = loadRawLog();
   const mainPromise = loadMainData();
-  // 2) 직전 방문 데이터가 있으면 먼저 화면에 표시 (수 초 대기 없이 바로 보임)
+  // 2) 직전 방문 데이터가 있으면 먼저 화면에 표시
   const [cMain, cRaw] = await Promise.all([cacheGet("main"), cacheGet("raw")]);
   if (cMain && !lastLoadedData){
     const rl = cRaw && cRaw.rows ? cRaw.rows : [];
     if (cRaw) rl.hasVipTags = cRaw.hasVipTags;
     lastLoadedData = { ...cMain, rawLog: rl };
-    try { render(lastLoadedData); } catch(e){ console.warn("캐시 렌더 실패", e); lastLoadedData = null; }
+    try { render(lastLoadedData); firstPaintDone = true; } catch(e){ console.warn("캐시 렌더 실패", e); lastLoadedData = null; }
   }
-  // 3) 최신 메인 데이터 반영
+  // 3) 최신 메인 데이터 반영 (캐시와 같으면 다시 그리지 않음)
   try {
     const main = await mainPromise;
+    const sig = sigOf(JSON.stringify(main));
+    const cacheSame = cMain && sigOf(JSON.stringify(cMain)) === sig;
+    mainSig = sig; lastCheckedAt = new Date(); lastChangedAt = new Date();
     lastLoadedData = { ...main, rawLog: lastLoadedData?.rawLog || [] };
-    render(lastLoadedData);
+    if (!firstPaintDone){ render(lastLoadedData); firstPaintDone = true; }
+    else if (!cacheSame) quietRender();
     cacheSet("main", main);
   } catch(e){ console.error(e); if (!lastLoadedData) alert("데이터를 불러오지 못했습니다: " + e.message); }
-  // 4) 최신 RAW 반영
+  // 4) 최신 RAW 반영 (바뀐 경우에만)
   const rawLog = await rawPromise;
   if (lastLoadedData && (rawLog.length || !lastLoadedData.rawLog.length)){
-    lastLoadedData.rawLog = rawLog;
-    render(lastLoadedData);
-    cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
+    const sig = rawSigOf(rawLog);
+    const prevSig = lastLoadedData.rawLog.length ? rawSigOf(lastLoadedData.rawLog) : null;
+    rawSig = sig;
+    if (sig !== prevSig){ lastLoadedData.rawLog = rawLog; quietRender(); cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags }); }
   }
-  setInterval(refreshRawLog, RAWLOG_REFRESH_MS);
+  updateStatusLabel();
+  // 5) 주기 확인: 창이 보일 때만 (백그라운드 탭에서는 쉬고, 다시 볼 때 오래됐으면 1회 확인)
+  setInterval(() => { if (!document.hidden) refresh(false); }, REFRESH_MS);
+  setInterval(() => { if (!document.hidden) refreshRawLog(false); }, RAWLOG_REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && lastCheckedAt && Date.now() - lastCheckedAt.getTime() > REFRESH_MS) refresh(false);
+  });
 }
 
 initialLoad();
