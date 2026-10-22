@@ -1975,7 +1975,7 @@ ${cmp(st.in, pst?.in)}</div>
 /* ===================== 클레임 VOC (CX Play Book 채널톡 태그관리 기준 · 이사님 보고용 심플 뷰) ===================== */
 // 4개 영역: 공급사 클레임 / 배송 클레임 / 서비스 클레임 / 기타. 이슈 유형은 tags 3depth를 단순화(처리방안·귀책 꼬리표 제거)
 // 상품: description의 "코드: HERO-xxxxxx" ↔ OM_CX_VOC 관리 시트 「상품정보 누적」
-const PRODUCT_MASTER_URL = "https://docs.google.com/spreadsheets/d/1dnD4l8tSVqVqf8FsbzfwlatskwxKy10Wr1ubEVbxDE0/export?format=csv&gid=1309645240"; // 열: 히어로코드·유통사명·상품명·유통사 상품명·대분류
+const PRODUCT_MASTER_URL = "https://docs.google.com/spreadsheets/d/1FS6Uh6SATkzjbpQiuhEt_pmCmcOJycvXz2Eli2XYUt4/export?format=csv"; // 임시 상품 매칭 시트 (운영툴 API 연동 전까지) // 열: 히어로코드·유통사명·상품명·유통사 상품명·대분류
 const CLAIM_AREAS = [
   { key:"supplier", name:"공급사 클레임", icon:"🏭", color:"#E8A33D", desc:"공급사클레임 · 품질불량" },
   { key:"delivery", name:"배송 클레임",   icon:"🚚", color:"#4C6EF5", desc:"배송클레임 · FC배송" },
@@ -2070,7 +2070,7 @@ function openClaimModal(kind, key){
   const ctx = window.__claimCtx; if (!ctx) return;
   let items, title, color;
   if (kind === "type"){ const [area, type] = key.split("|"); items = ctx.cur[area].types[type] || []; title = `${CLAIM_AREA_MAP[area].icon} ${type}`; color = CLAIM_AREA_MAP[area].color; }
-  else { items = ctx.items.filter(it => it.codes.includes(key) && it.claims.some(c => c.area === "supplier")); title = `📦 ${productName(key)}`; color = CLAIM_AREA_MAP.supplier.color; }
+  else { const pg = (window.__claimProd||[])[key]; if (!pg) return; items = pg.items; title = `📦 ${pg.name} · ${pg.sup}`; color = CLAIM_AREA_MAP.supplier.color; }
   items = items.slice().sort((a,b) => (vipMdKey(b.r.date)*100 + b.r.hour) - (vipMdKey(a.r.date)*100 + a.r.hour));
   const top = (f) => { const m = {}; items.forEach(it => { const k = f(it); if (k) m[k] = (m[k]||0) + 1; }); return Object.entries(m).sort((a,b)=>b[1]-a[1]); };
   const sup = top(it => it.supplier), cen = top(it => it.r.center), typ = (() => { const m = {}; items.forEach(it => it.claims.filter(c => c.area === "supplier").forEach(c => m[c.type] = (m[c.type]||0) + 1)); return Object.entries(m).sort((a,b)=>b[1]-a[1]); })();
@@ -2208,16 +2208,23 @@ function renderClaim(data){
   }).join("");
 
   // 3) 클레임 상품 TOP 10 (상품별 유형 건수)
+  // 상품 = "상품명 + 공급사" 기준으로 묶음 (같은 상품·같은 공급사인데 히어로코드만 다른 경우 중복 집계 방지)
   const prodMap = {};
-  items.filter(it => it.claims.some(c => c.area === "supplier")).forEach(it => it.codes.forEach(code => {
-    const p = prodMap[code] = prodMap[code] || { n:0, types:{}, sup: it.supplier || productMaster?.[code]?.dist || "-" };
-    p.n++; it.claims.filter(c => c.area === "supplier").forEach(c => p.types[c.type] = (p.types[c.type]||0) + 1);
-  }));
+  items.filter(it => it.claims.some(c => c.area === "supplier")).forEach(it => {
+    const keys = new Map();
+    it.codes.forEach(code => { const name = productName(code); const sup = normalizeSupplier(it.supplier || productMaster?.[code]?.dist || "") || "-"; keys.set(`${name}|${sup}`, { name, sup, code }); });
+    keys.forEach((v, k) => {
+      const p = prodMap[k] = prodMap[k] || { n:0, types:{}, name:v.name, sup:v.sup, codes:new Set(), items:[] };
+      p.n++; p.items.push(it); p.codes.add(v.code);
+      it.claims.filter(c => c.area === "supplier").forEach(c => p.types[c.type] = (p.types[c.type]||0) + 1);
+    });
+  });
   const prodTop = Object.entries(prodMap).sort((a,b)=>b[1].n-a[1].n).slice(0, 10);
+  window.__claimProd = prodTop.map(([,p]) => p);
   const prodHTML = prodTop.length ? prodTop.map(([code, p], i) => `
-    <div onclick="openClaimModal('product','${code}')" style="display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
+    <div onclick="openClaimModal('product',${i})" style="display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
       <b style="width:22px;color:${i<3?CLAIM_AREA_MAP.supplier.color:'var(--ink-dim)'};">${i+1}</b>
-      <div style="flex:1;min-width:0;"><div style="font-weight:700;color:var(--ink);">${esc(productName(code))} <span style="font-size:11.5px;color:var(--ink-dim);font-weight:400;">· ${esc(p.sup)}</span></div>
+      <div style="flex:1;min-width:0;"><div style="font-weight:700;color:var(--ink);">${esc(p.name)} <span style="font-size:11.5px;color:var(--ink-dim);font-weight:400;">· ${esc(p.sup)}</span></div>
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;">${Object.entries(p.types).sort((a,b)=>b[1]-a[1]).map(([t,n]) => `<span style="font-size:11.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:1px 8px;">${esc(t)} <b>${n}</b></span>`).join("")}</div></div>
       <div style="font-size:18px;font-weight:800;">${p.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;">상세 ›</span>
@@ -2232,7 +2239,7 @@ function renderClaim(data){
     <div class="footer-note">
       분류: CX Play Book 「채널톡_태그관리」 기준 — 공급사 클레임(공급사클레임·품질불량), 배송 클레임(배송클레임·FC배송), 서비스 클레임(서비스이용클레임), 기타(유관부서 전달).<br>
       유형은 tags 3depth를 단순화했습니다(품질불량의 환불·퀵 등 처리방안, "(배송기사)"·"(보냉불량)" 꼬리표 제외 · 분리/익일배송→미배송, 정정배송→오배송). 한 상담에 여러 유형이 있으면 유형별로 각각 셉니다.<br>
-      상품은 상담 설명의 HERO 코드를 OM_CX_VOC 「상품정보 누적」과 매칭합니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
+      상품은 상담 설명의 HERO 코드를 상품 매칭 시트(히어로코드·유통사명·상품명)와 매칭하고, 같은 상품명·같은 공급사는 하나로 묶습니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
     </div>`;
 }
 
