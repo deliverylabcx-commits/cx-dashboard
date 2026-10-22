@@ -43,6 +43,13 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   button{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;}
   button:hover{border-color:var(--accent);}
+  .card.collapsible > h2{cursor:pointer;user-select:none;position:relative;padding-right:28px;}
+  .card.collapsible > h2::after{content:"▾";position:absolute;right:2px;top:0;color:var(--ink-dim);font-size:13px;transition:transform .15s;}
+  .card.collapsed > h2{margin-bottom:0;}
+  .card.collapsed > h2::after{transform:rotate(-90deg);}
+  .card.collapsed > :not(h2){display:none !important;}
+  .card-toolbar{display:flex;gap:8px;justify-content:flex-end;margin:-10px 0 14px;font-size:12px;}
+  .card-toolbar button{padding:5px 10px;font-size:11.5px;}
   .vip-btn{background:linear-gradient(135deg,#F2C14E,#E8A33D);color:#1a1206;font-weight:700;border:none;}
   .seg{display:inline-flex;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px;}
   .seg button{background:transparent;border:none;padding:7px 16px;font-size:13px;font-weight:600;color:var(--ink-dim);border-radius:8px;}
@@ -671,6 +678,8 @@ function parseRawLog(text){
     tags: header.indexOf("tags"),
     description: header.indexOf("description"),
     summary: header.indexOf("summarizedMessage"),
+    missed: header.indexOf("missedReason"),
+    medium: header.indexOf("mediumType"),
     vipTags: header.indexOf("Tags"), // DF열 "Tags"(대문자) - 고객 등급 태그 (소문자 "tags"=상담 분류와 별개)
   };
   // 센터(허브) 컬럼은 위치가 아닌 "헤더 이름"으로 찾는다 - 시트에서 어느 열에 넣어도 동작
@@ -703,6 +712,8 @@ function parseRawLog(text){
       center: idx.center>=0 ? (row[idx.center] || "").trim() : "",
       url: (row[URL_COL_INDEX] || "").trim(),
       month: parseInt(m[2]),
+      missedReason: idx.missed>=0 ? (row[idx.missed]||"").trim() : "",
+      medium: idx.medium>=0 ? (row[idx.medium]||"").trim() : "",
       vip: (() => { if (idx.vipTags < 0) return null; const vm = (row[idx.vipTags]||"").match(/VIP_(\d)등급/); return vm ? parseInt(vm[1]) : null; })(),
     });
   }
@@ -1869,6 +1880,407 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
   }
 }
 
+/* ===================== 채팅 · CALL 인입 (RAW tags: CALL/CALL/인바운드·아웃바운드) ===================== */
+// 시트(CS_Tracking) 상담인입 = 채팅 상담 기준. 전화 인바운드(CALL/CALL/인바운드)는 대부분 담당자 미배정이라 시트에 잡히지 않아 RAW로 별도 집계해 "통합 인입"에 더한다.
+const CALL_IN_RE = /CALL\/CALL\/인바운드/, CALL_OUT_RE = /CALL\/CALL\/아웃바운드/;
+const CALL_MISSED_LABEL = { wfEndCall:"ARS(워크플로우) 종료", userLeftInQueued:"대기 중 고객 이탈", userLeftInWaitingManager:"상담원 연결 대기 중 이탈", notInOperation:"운영시간 외", wfInputTimeout:"ARS 입력 시간초과" };
+function callStats(rawLog, dateSet){
+  const s = { in:0, inConnected:0, inMissed:0, out:0, byAgent:{}, missedReasons:{}, byDate:{} };
+  (rawLog||[]).forEach(r => {
+    if (dateSet && !dateSet.has(r.date)) return;
+    const isIn = CALL_IN_RE.test(r.tags||""), isOut = CALL_OUT_RE.test(r.tags||"");
+    if (!isIn && !isOut) return;
+    const a = r.agent || "미연결";
+    const b = s.byAgent[a] = s.byAgent[a] || { in:0, out:0 };
+    const d = s.byDate[r.date] = s.byDate[r.date] || { in:0, out:0 };
+    if (isIn){
+      s.in++; b.in++; d.in++;
+      if (r.agent) s.inConnected++;
+      else { s.inMissed++; const k = CALL_MISSED_LABEL[r.missedReason] || (r.missedReason ? r.missedReason : "사유 미기재"); s.missedReasons[k] = (s.missedReasons[k]||0) + 1; }
+    }
+    if (isOut){ s.out++; b.out++; d.out++; }
+  });
+  return s;
+}
+// 통합 인입 = 시트 상담인입(채팅) + CALL 인바운드
+function buildCallSection(data, dates, prevDates, opts){
+  const { sections, totalRow, rawLog } = data;
+  const agents = AGENT_ORDER.filter(a => sections["상담인입"] && sections["상담인입"][a]);
+  const depMap = departedInboundByDate(rawLog, sections);
+  const hasRaw = (rawLog||[]).length > 0;
+  const chatOf = ds => sum(ds.map(d => totalInboundOn(d, totalRow, sections, agents, depMap) || 0));
+  const st = callStats(rawLog, new Set(dates));
+  const pst = prevDates ? callStats(rawLog, new Set(prevDates)) : null;
+  const chat = chatOf(dates), pchat = prevDates ? chatOf(prevDates) : null;
+  const total = chat + st.in, ptotal = pst ? pchat + pst.in : null;
+  const cmp = (cur, prev) => {
+    if (prev == null || !hasRaw) return `<div class="delta" style="color:var(--ink-dim);">${opts.prevLabel||'이전'} 데이터 없음</div>`;
+    const d = cur - prev; const r = prev ? Math.round(d/prev*100) : null;
+    return `<div class="delta" style="color:${d>0?'var(--accent)':'var(--ink-dim)'};">${opts.prevLabel} 대비 ${d>=0?'▲':'▼'} ${fmtNum(Math.abs(d))}건${r!=null?` (${d>=0?'+':'-'}${Math.abs(r)}%)`:''}</div>`;
+  };
+  // 담당자별: 시트 채팅 인입 + RAW CALL 인/아웃
+  const names = [...new Set([...agents, ...Object.keys(st.byAgent)])].filter(n => n !== "미연결");
+  const rowsA = names.map(a => {
+    const c = agents.includes(a) ? sum(dates.map(d => sections["상담인입"]?.[a]?.[d] || 0)) : null;
+    const ci = st.byAgent[a]?.in || 0, co = st.byAgent[a]?.out || 0;
+    return { a, c, ci, co, t: (c||0) + ci };
+  }).filter(r => (r.c||0) + r.ci + r.co > 0).sort((x,y) => y.t - x.t || y.co - x.co);
+  const miss = st.byAgent["미연결"]?.in || 0;
+  const reasons = Object.entries(st.missedReasons).sort((a,b)=>b[1]-a[1]);
+  const hasReason = reasons.some(([k]) => k !== "사유 미기재"); // RAW_대시보드에 missedReason 열이 있을 때만 표시
+  const connRate = st.in ? st.inConnected / st.in : null;
+  const html = `
+    <div class="card" style="margin-bottom:16px;">
+      <h2>채팅 · CALL 인입 현황<span class="tag">${opts.periodLabel} · 통합 인입 = 채팅(시트) + CALL 인바운드</span></h2>
+      ${!hasRaw ? `<div style="color:var(--ink-dim);font-size:12.5px;">채널톡 RAW를 불러오는 중입니다… (CALL 집계는 RAW 기준)</div>` : `
+      <div class="kpis vip-kpis">
+        <div class="kpi" style="border-color:#4C6EF566;"><div class="label">통합 인입</div><div class="val">${fmtNum(total)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>${cmp(total, ptotal)}</div>
+        <div class="kpi"><div class="label">💬 채팅 인입 <span style="font-size:11px;">(시트 상담인입)</span></div><div class="val">${fmtNum(chat)}</div>${cmp(chat, pchat)}</div>
+        <div class="kpi"><div class="label">📞 CALL 인바운드</div><div class="val">${fmtNum(st.in)}</div>
+          <div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">연결 ${fmtNum(st.inConnected)} · 미연결 ${fmtNum(st.inMissed)}${connRate!=null?` (연결률 ${fmtPct(connRate)})`:''}</div>${cmp(st.in, pst?.in)}</div>
+        <div class="kpi"><div class="label">📤 CALL 아웃바운드</div><div class="val">${fmtNum(st.out)}</div>${cmp(st.out, pst?.out)}</div>
+      </div>
+      <div class="grid2" style="margin-bottom:0;">
+        <div style="overflow-x:auto;">
+          <table>
+            <tr><th>담당자</th><th>💬 채팅 인입</th><th>📞 CALL 인바운드</th><th>📤 CALL 아웃바운드</th><th>통합 인입</th></tr>
+            ${rowsA.map(r => `<tr><td><span class="grade-chip" style="border-radius:50%;background:${AGENT_COLORS[r.a]||VIP_EXTRA_AGENT_COLORS[r.a]||'#8B96AD'}"></span><span style="color:var(--ink);font-weight:600;">${r.a}</span></td>
+              <td>${r.c==null?'<span style="color:var(--ink-dim);" title="CS_Tracking 시트에 행 없음">-</span>':fmtNum(r.c)}</td><td>${fmtNum(r.ci)}</td><td>${fmtNum(r.co)}</td><td class="hl-num">${fmtNum(r.t)}</td></tr>`).join("")}
+            ${miss ? `<tr><td style="color:var(--bad);">미연결 (담당자 없음)</td><td>-</td><td style="color:var(--bad);font-weight:700;">${fmtNum(miss)}</td><td>-</td><td>${fmtNum(miss)}</td></tr>` : ''}
+            <tr style="border-top:2px solid var(--line);"><td style="color:var(--ink);font-weight:700;">합계</td><td class="hl-num">${fmtNum(chat)}</td><td class="hl-num">${fmtNum(st.in)}</td><td class="hl-num">${fmtNum(st.out)}</td><td class="hl-num">${fmtNum(total)}</td></tr>
+          </table>
+          ${hasReason ? `<div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">미연결 사유: ${reasons.map(([k,n])=>`${k} ${n}건`).join(" · ")}</div>` : ''}
+          <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;">채팅 인입 합계는 시트 상담인입_Total 기준(퇴사자 보정 포함)이라 담당자 합과 다를 수 있습니다. songsong 등 시트에 행이 없는 인원은 CALL만 표시됩니다.</div>
+        </div>
+        <div><canvas id="${opts.canvasId}" style="max-height:260px;"></canvas></div>
+      </div>`}
+    </div>`;
+  const draw = () => {
+    const el = document.getElementById(opts.canvasId); if (!el || !hasRaw) return;
+    const xs = opts.trendDates || dates;
+    const tst = callStats(rawLog, new Set(xs));
+    charts[opts.canvasId] = new Chart(el, {
+      type: "bar",
+      data: { labels: xs.map(d => dateLabel(d)), datasets: [
+        { label: "💬 채팅(시트)", data: xs.map(d => totalInboundOn(d, totalRow, sections, agents, depMap) || 0), backgroundColor: "#4C6EF5BB", borderRadius: 3, stack: "s" },
+        { label: "📞 CALL 인바운드", data: xs.map(d => tst.byDate[d]?.in || 0), backgroundColor: "#E8A33DCC", borderRadius: 3, stack: "s" },
+        { type: "line", label: "📤 CALL 아웃바운드", data: xs.map(d => tst.byDate[d]?.out || 0), borderColor: "#12B886", backgroundColor: "#12B886", tension: .3, pointRadius: 2 } ] },
+      options: { plugins:{ legend:{ position:"bottom", labels:{boxWidth:10} }, tooltip:{ mode:"index", intersect:false } },
+        scales:{ x:{ stacked:true, grid:{display:false}, ticks:{ color: (c) => { const d = xs[c.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; } } }, y:{ stacked:true, beginAtZero:true, grid:{color:"#28324D"} } } }
+    });
+  };
+  return { html, draw, total, chat, callIn: st.in, stats: st };
+}
+
+/* ===================== 클레임 VOC (CX Play Book 채널톡 태그관리 기준) ===================== */
+// 태그 구조: 1depth/2depth/3depth (예: 배송/배송클레임/미배송(배송기사), 공급사/공급사클레임/미입고, 공급사/품질불량/환불)
+// 상품: RAW_대시보드 C열(description)의 "코드: HERO-xxxxxx" ↔ OM_CX_VOC 관리 시트 '상품정보 누적' 탭(히어로코드·유통사명·상품명·대분류)
+const PRODUCT_MASTER_URL = "https://docs.google.com/spreadsheets/d/1dnD4l8tSVqVqf8FsbzfwlatskwxKy10Wr1ubEVbxDE0/export?format=csv&gid=1309645240"; // 열: 히어로코드·유통사명·상품명·유통사 상품명·대분류
+const CLAIM_DEPTS = {
+  sales:   { name:"영업(MD·공급사)", color:"#E8A33D", desc:"공급사클레임 · 품질불량 · 코드오매칭" },
+  logi:    { name:"물류(센터·배송)",  color:"#4C6EF5", desc:"배송클레임(센터·배송기사)" },
+  fc:      { name:"물류(Hub·FC배송)", color:"#748FFC", desc:"FC배송(이천Hub·제때)" },
+  service: { name:"서비스·개발",      color:"#BE4BDB", desc:"결제오류 · 어플오류 · 발주누락" },
+  etc:     { name:"유관부서 전달",    color:"#20C997", desc:"기타/유관부서전달" },
+};
+const CLAIM_GROUP_COLORS = { "공급사클레임":"#E8A33D", "품질불량":"#F76707", "배송클레임":"#4C6EF5", "FC배송":"#748FFC", "서비스이용클레임":"#BE4BDB", "유관부서전달":"#20C997" };
+let productMaster = null, productMasterLoading = false, productMasterError = null;
+let claimPeriod = "daily", claimSelDate = null, claimSelWeek = null, claimSelMonth = null;
+let claimFilter = { group:"", key:"", q:"" };
+
+function esc(v){ return String(v==null?"":v).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
+function classifyClaimTag(tag){
+  const p = tag.split("/").map(x => x.trim());
+  if (p.length < 2) return null;
+  const [d1, d2, d3=""] = p;
+  if (d2 === "공급사클레임") return { group:"공급사클레임", type: d3 || "기타", dept:"sales" };
+  if (d2 === "품질불량") return { group:"품질불량", type:"품질불량", action: d3 || "", dept:"sales" };
+  if (d2 === "FC배송") return { group:"FC배송", type: d3 || "기타", dept:"fc" };
+  if (d2 === "배송클레임"){
+    const driver = /\(배송기사\)/.test(d3);
+    return { group:"배송클레임", type: d3.replace(/\(배송기사\)/g, "").trim() || "기타", fault: driver ? "배송기사" : "센터(MFC)", dept:"logi" };
+  }
+  if (d2 === "서비스이용클레임") return { group:"서비스이용클레임", type: d3 || "기타", dept: d3 === "코드오매칭" ? "sales" : "service" };
+  if (d1 === "기타" && d3 === "유관부서전달") return { group:"유관부서전달", type:"유관부서전달", dept:"etc" };
+  return null;
+}
+function parseClaimRow(r){
+  const tags = (r.tags||"").split(",").map(t => t.trim()).filter(Boolean);
+  const claims = tags.map(classifyClaimTag).filter(Boolean);
+  if (!claims.length) return null;
+  const supTag = tags.find(t => /^공급사\/공급사명\//.test(t));
+  const supplier = supTag ? normalizeSupplier(supTag.split("/").slice(2).join("/")) : null;
+  const codes = [...new Set(((r.desc||"").match(/HERO-[0-9A-Z]{6}/gi) || []).map(c => c.toUpperCase()))];
+  const ask = ((r.desc||"").match(/문의\s*:\s*([^\n/]*)/) || [])[1] || "";
+  return { r, claims, supplier, codes, ask: ask.trim() };
+}
+async function loadProductMaster(){
+  if (productMaster || productMasterLoading) return;
+  productMasterLoading = true;
+  try {
+    const rows = Papa.parse((await fetchCSV(PRODUCT_MASTER_URL)).trim()).data;
+    const m = {};
+    rows.slice(1).forEach(x => { const code = (x[0]||"").trim().toUpperCase(); if (/^HERO-/.test(code)) m[code] = { dist:(x[1]||"").trim(), name:(x[2]||"").trim(), cat:(x[4]||"").trim() }; });
+    productMaster = m;
+  } catch(e){ productMasterError = e.message; console.warn("상품정보 시트 로드 실패:", e.message); }
+  productMasterLoading = false;
+  if (viewMode === "claim" && lastLoadedData) quietRender();
+}
+function switchToClaim(){ viewMode = "claim"; window.scrollTo(0,0); if (lastLoadedData) render(lastLoadedData); loadProductMaster(); }
+function setClaimPeriod(p){ claimPeriod = p; if (lastLoadedData) render(lastLoadedData); }
+function onClaimDate(iso){ if (iso){ claimSelDate = isoToMD(iso); render(lastLoadedData); } }
+function onClaimWeek(v){ claimSelWeek = v; render(lastLoadedData); }
+function onClaimMonth(v){ claimSelMonth = v; render(lastLoadedData); }
+function onClaimFilter(k, v){ claimFilter[k] = v; const el = document.getElementById("claimList"); if (el && window.__claimListRender) el.innerHTML = window.__claimListRender(); }
+
+function claimAgg(items){
+  const a = { chats: items.length, groups:{}, depts:{}, types:{}, suppliers:{}, products:{}, centers:{}, fc:{} };
+  items.forEach(it => {
+    const seenG = new Set(), seenD = new Set();
+    it.claims.forEach(c => {
+      if (!seenG.has(c.group)){ seenG.add(c.group); a.groups[c.group] = (a.groups[c.group]||0) + 1; }
+      if (!seenD.has(c.dept)){ seenD.add(c.dept); (a.depts[c.dept] = a.depts[c.dept] || { n:0, types:{}, items:[] }).n++; a.depts[c.dept].items.push(it); }
+      const tk = `${c.group}|${c.type}`; a.types[tk] = (a.types[tk]||0) + 1;
+      a.depts[c.dept].types[c.type] = (a.depts[c.dept].types[c.type]||0) + 1;
+      if (c.dept === "sales" && c.group !== "서비스이용클레임"){
+        const sk = it.supplier || "공급사 미기재";
+        const s = a.suppliers[sk] = a.suppliers[sk] || { n:0, types:{}, products:{}, items:[] , _seen:new Set() };
+        if (!s._seen.has(it)){ s._seen.add(it); s.n++; s.items.push(it); }
+        const lab = c.group === "품질불량" ? `품질불량${c.action?`(${c.action})`:''}` : c.type;
+        s.types[lab] = (s.types[lab]||0) + 1;
+        (it.codes.length ? it.codes : ["코드없음"]).forEach(code => {
+          const p = s.products[code] = s.products[code] || { n:0, types:{}, items:[] };
+          if (!p.items.includes(it)){ p.n++; p.items.push(it); }
+          p.types[lab] = (p.types[lab]||0) + 1;
+          if (code !== "코드없음"){ const g = a.products[code] = a.products[code] || { n:0, sup:sk, types:{}, items:[] }; if (!g.items.includes(it)){ g.n++; g.items.push(it); } g.types[lab] = (g.types[lab]||0)+1; }
+        });
+      }
+      if (c.group === "배송클레임"){
+        const ck = it.r.center || "센터 미기재";
+        const cc = a.centers[ck] = a.centers[ck] || { n:0, types:{}, driver:0, items:[] };
+        if (!cc.items.includes(it)){ cc.n++; cc.items.push(it); }
+        cc.types[c.type] = (cc.types[c.type]||0) + 1;
+        if (c.fault === "배송기사") cc.driver++;
+      }
+      if (c.group === "FC배송"){ a.fc[c.type] = (a.fc[c.type]||0) + 1; }
+    });
+  });
+  return a;
+}
+function claimLinks(items, max){
+  return items.slice(0, max||8).map(it => it.r.url ? `<a href="${esc(it.r.url)}" target="_blank" title="${esc(it.r.store)} · ${esc(it.ask)}" style="color:var(--accent);text-decoration:none;margin-right:6px;">🔗</a>` : "").join("") + (items.length > (max||8) ? `<span style="font-size:11px;color:var(--ink-dim);">+${items.length-(max||8)}</span>` : "");
+}
+function topTypesTxt(obj, n){ return Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0, n||3).map(([k,v]) => `${esc(k)} ${v}`).join(" · "); }
+function claimRowsTable(items, limit){
+  const list = items.slice().sort((a,b) => (b.r.month*10000 + vipMdKey(b.r.date)*100 + b.r.hour) - (a.r.month*10000 + vipMdKey(a.r.date)*100 + a.r.hour)).slice(0, limit||50);
+  return `<div style="overflow-x:auto;"><table style="font-size:12px;margin-top:8px;">
+    <tr><th style="text-align:left;">일시</th><th style="text-align:left;">사업장</th><th style="text-align:left;">유형</th><th style="text-align:left;">공급사·센터</th><th style="text-align:left;">상품</th><th style="text-align:left;">문의 요약</th><th>담당</th><th>링크</th></tr>
+    ${list.map(it => { const prod = it.codes.map(c => productMaster?.[c]?.name || c).join(", ");
+      return `<tr><td style="text-align:left;white-space:nowrap;">${dateLabel(it.r.date)} ${it.r.hour}시</td><td style="text-align:left;color:var(--ink);">${esc(it.r.store)}</td>
+      <td style="text-align:left;">${it.claims.map(c => `<span style="color:${CLAIM_GROUP_COLORS[c.group]};">${esc(c.group==='품질불량'?`품질불량${c.action?`(${c.action})`:''}`:c.type)}</span>${c.fault==='배송기사'?'<span style="font-size:10px;color:var(--ink-dim);">(기사)</span>':''}`).join(", ")}</td>
+      <td style="text-align:left;">${esc(it.supplier || it.r.center || "-")}</td><td style="text-align:left;">${esc(prod || "-")}</td>
+      <td style="text-align:left;max-width:280px;color:var(--ink-dim);">${esc(it.ask.slice(0,60))}</td><td>${esc(it.r.agent||"-")}</td>
+      <td>${it.r.url?`<a href="${esc(it.r.url)}" target="_blank" style="color:var(--accent);">열기</a>`:'-'}</td></tr>`; }).join("")}
+  </table></div>${items.length > (limit||50) ? `<div style="font-size:11px;color:var(--ink-dim);margin-top:4px;">최근 ${limit||50}건 표시 (전체 ${items.length}건)</div>` : ''}`;
+}
+
+function renderClaim(data){
+  const app = document.getElementById("app");
+  const rawLog = data.rawLog || [];
+  const nav = (picker) => `
+    <header>
+      <div><h1>🧾 클레임 VOC</h1><div class="sub">채널톡 태그(CX Play Book 태그관리 기준) · 부서별 VOC · 공급사×상품 · 센터×유형 · 채널톡 딥링크</div></div>
+      <div class="status">
+        <div class="seg">
+          <button class="${claimPeriod==='daily'?'on':''}" onclick="setClaimPeriod('daily')">일간</button>
+          <button class="${claimPeriod==='weekly'?'on':''}" onclick="setClaimPeriod('weekly')">주간</button>
+          <button class="${claimPeriod==='monthly'?'on':''}" onclick="setClaimPeriod('monthly')">월간</button>
+        </div>
+        ${picker||""}
+        <button onclick="switchToDaily()">← CX 메인 대시보드</button>
+      </div>
+    </header>`;
+  destroyCharts();
+  if (!rawLog.length){ app.innerHTML = nav() + `<div class="card loading">채널톡 RAW를 불러오는 중입니다…</div>`; return; }
+
+  const allItems = rawLog.map(parseClaimRow).filter(Boolean);
+  const allDates = [...new Set(rawLog.map(r => r.date))].sort((a,b)=>vipMdKey(a)-vipMdKey(b));
+  const weeks = buildWeekList(allDates), months = buildMonthList(allDates);
+  let ds, pds, title, picker, prevLabel, trendDates;
+  if (claimPeriod === "daily"){
+    const lastClaim = allItems.length ? allItems.map(i=>i.r.date).sort((a,b)=>vipMdKey(a)-vipMdKey(b)).pop() : allDates[allDates.length-1];
+    if (!claimSelDate || !allDates.includes(claimSelDate)) claimSelDate = lastClaim;
+    const prevD = allDates.filter(d => vipMdKey(d) < vipMdKey(claimSelDate) && weekdayOf(d) !== 0).pop();
+    ds = [claimSelDate]; pds = prevD ? [prevD] : null; prevLabel = "전 영업일"; title = dateLabel(claimSelDate);
+    const idx = allDates.indexOf(claimSelDate); trendDates = allDates.slice(0, idx+1).filter(d => weekdayOf(d) !== 0).slice(-14);
+    picker = `<input type="date" value="${mdToISO(claimSelDate)}" min="${mdToISO(allDates[0])}" max="${mdToISO(allDates[allDates.length-1])}" onchange="onClaimDate(this.value)">`;
+  } else if (claimPeriod === "weekly"){
+    if (!claimSelWeek || !weeks.find(w=>w.monday===claimSelWeek)) claimSelWeek = weeks[weeks.length-1].monday;
+    const wi = weeks.findIndex(w=>w.monday===claimSelWeek); const w = weeks[wi];
+    ds = w.dates; pds = wi>0 ? weeks[wi-1].dates : null; prevLabel = "전주"; title = dateRangeLabel(w.monday, w.saturday); trendDates = w.dates;
+    picker = `<select style="${VIP_SEL_STYLE}" onchange="onClaimWeek(this.value)">${weeks.map(x=>`<option value="${x.monday}" ${x.monday===claimSelWeek?'selected':''}>${dateRangeLabel(x.monday,x.saturday)}</option>`).join("")}</select>`;
+  } else {
+    if (!claimSelMonth || !months.find(m=>m.key===claimSelMonth)) claimSelMonth = months[months.length-1].key;
+    const mi = months.findIndex(m=>m.key===claimSelMonth); const mo = months[mi];
+    ds = mo.dates; pds = mi>0 ? months[mi-1].dates : null; prevLabel = "전월"; title = mo.label; trendDates = mo.dates.filter(d => weekdayOf(d) !== 0);
+    picker = `<select style="${VIP_SEL_STYLE}" onchange="onClaimMonth(this.value)">${months.map(x=>`<option value="${x.key}" ${x.key===claimSelMonth?'selected':''}>${x.label}</option>`).join("")}</select>`;
+  }
+  const dSet = new Set(ds), pSet = pds ? new Set(pds) : null;
+  const items = allItems.filter(i => dSet.has(i.r.date));
+  const pitems = pSet ? allItems.filter(i => pSet.has(i.r.date)) : null;
+  const A = claimAgg(items), P = pitems ? claimAgg(pitems) : null;
+  const inbound = rawLog.filter(r => dSet.has(r.date) && r.direction === "INBOUND").length;
+  const delta = (cur, prev) => {
+    if (prev == null) return `<div class="delta" style="color:var(--ink-dim);">${prevLabel} 데이터 없음</div>`;
+    const d = cur - prev; const r = prev ? Math.round(d/prev*100) : null;
+    return `<div class="delta" style="color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">${prevLabel} 대비 ${d>0?'▲':d<0?'▼':''} ${Math.abs(d)}건${r!=null&&d?` (${d>0?'+':'-'}${Math.abs(r)}%)`:''}</div>`;
+  };
+  const pmNote = productMaster ? "" : productMasterError ? `<span style="color:var(--bad);">상품정보 시트를 불러오지 못해 상품코드로 표시합니다</span>` : `<span style="color:var(--accent);">상품정보 매칭 중…</span>`;
+  const pname = code => code === "코드없음" ? "상품코드 미기재" : (productMaster?.[code]?.name || code);
+
+  // 1) 요약
+  const sumKpi = (label, cur, prev, color) => `<div class="kpi" style="border-color:${color||'var(--line)'}66;"><div class="label">${label}</div><div class="val" style="${color?`color:${color};`:''}">${fmtNum(cur)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div>${delta(cur, prev)}</div>`;
+  const g = k => A.groups[k]||0, pg = k => P ? (P.groups[k]||0) : null;
+  const kpis = `<div class="kpis vip-kpis">
+    ${sumKpi("전체 클레임 (상담 기준)", A.chats, P?.chats, "#F0555B")}
+    <div class="kpi"><div class="label">클레임율</div><div class="val">${inbound?fmtPct(A.chats/inbound):'-'}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">채널톡 인입 ${fmtNum(inbound)}건 중</div></div>
+    ${sumKpi("공급사클레임 + 품질불량", g("공급사클레임")+g("품질불량"), P ? pg("공급사클레임")+pg("품질불량") : null, CLAIM_DEPTS.sales.color)}
+    ${sumKpi("배송클레임 + FC배송", g("배송클레임")+g("FC배송"), P ? pg("배송클레임")+pg("FC배송") : null, CLAIM_DEPTS.logi.color)}
+    ${sumKpi("서비스이용클레임", g("서비스이용클레임"), pg("서비스이용클레임"), CLAIM_DEPTS.service.color)}
+    ${sumKpi("유관부서 전달", g("유관부서전달"), pg("유관부서전달"), CLAIM_DEPTS.etc.color)}
+  </div>`;
+
+  // 2) 부서별 VOC
+  const deptCards = Object.entries(CLAIM_DEPTS).map(([k, d]) => {
+    const x = A.depts[k], px = P?.depts[k];
+    const n = x?.n || 0;
+    return `<div class="card" style="border-top:3px solid ${d.color};">
+      <h2 style="margin-bottom:6px;">${d.name}<span class="tag">${d.desc}</span></h2>
+      <div style="display:flex;align-items:baseline;gap:10px;"><div style="font-size:26px;font-weight:800;color:${n?d.color:'var(--ink-dim)'};">${fmtNum(n)}<span style="font-size:13px;color:var(--ink-dim);font-weight:500;"> 건</span></div><div style="font-size:12px;">${delta(n, P ? (px?.n||0) : null)}</div></div>
+      <div style="font-size:12.5px;color:var(--ink);margin-top:6px;">${x ? topTypesTxt(x.types, 4) : '<span style="color:var(--ink-dim);">해당 없음</span>'}</div>
+      ${x ? `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12.5px;color:var(--ink-dim);">상담 목록 · 채널톡 링크 (${x.items.length}건)</summary>${claimRowsTable(x.items, 30)}</details>` : ''}
+    </div>`; }).join("");
+
+  // 3) 공급사 × 상품
+  const supRows = Object.entries(A.suppliers).sort((a,b)=>b[1].n-a[1].n);
+  const supTable = supRows.length ? supRows.slice(0, 25).map(([sname, s], i) => {
+    const pn = P?.suppliers[sname]?.n || 0; const d = P ? s.n - pn : null;
+    const prods = Object.entries(s.products).sort((a,b)=>b[1].n-a[1].n);
+    return `<details class="sup-row" ${i<3?'':''} style="border-bottom:1px solid var(--line);padding:8px 2px;">
+      <summary style="cursor:pointer;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;list-style:none;">
+        <span style="width:22px;color:var(--ink-dim);font-size:12px;">${i+1}</span>
+        <span style="flex:1;min-width:120px;color:var(--ink);font-weight:700;">${esc(sname)}</span>
+        <span style="flex:2;font-size:12px;color:var(--ink-dim);">${topTypesTxt(s.types, 3)}</span>
+        <span style="width:70px;text-align:right;font-size:12px;color:var(--ink-dim);">상품 ${prods.filter(([c])=>c!=='코드없음').length}종</span>
+        <span style="width:60px;text-align:right;font-weight:800;color:var(--ink);">${s.n}건</span>
+        <span style="width:70px;text-align:right;font-size:12px;color:${d>0?'var(--bad)':d<0?'var(--good)':'var(--ink-dim)'};">${d==null?'':d>0?'▲'+d:d<0?'▼'+Math.abs(d):'-'}</span>
+      </summary>
+      <div style="overflow-x:auto;margin:8px 0 4px 0;"><table style="font-size:12px;">
+        <tr><th style="text-align:left;">상품명</th><th style="text-align:left;">코드</th><th style="text-align:left;">대분류</th><th>건수</th><th style="text-align:left;">이슈 유형</th><th style="text-align:left;">채널톡</th></tr>
+        ${prods.slice(0, 15).map(([code, p]) => `<tr><td style="text-align:left;color:var(--ink);font-weight:600;">${esc(pname(code))}</td><td style="text-align:left;color:var(--ink-dim);">${code==='코드없음'?'-':code}</td><td style="text-align:left;color:var(--ink-dim);">${esc(productMaster?.[code]?.cat||'-')}</td><td class="hl-num">${p.n}</td><td style="text-align:left;">${topTypesTxt(p.types, 3)}</td><td style="text-align:left;">${claimLinks(p.items, 6)}</td></tr>`).join("")}
+      </table></div>
+    </details>`; }).join("") : `<div style="color:var(--ink-dim);font-size:12.5px;">해당 기간 공급사 클레임이 없습니다.</div>`;
+  const prodTop = Object.entries(A.products).sort((a,b)=>b[1].n-a[1].n).slice(0, 10);
+  const prodTable = prodTop.length ? `<table style="font-size:12.5px;">
+    <tr><th style="text-align:left;">순위</th><th style="text-align:left;">상품명</th><th style="text-align:left;">공급사</th><th>건수</th><th style="text-align:left;">이슈 유형</th><th style="text-align:left;">채널톡</th></tr>
+    ${prodTop.map(([code, p], i) => `<tr><td style="text-align:left;">${i+1}</td><td style="text-align:left;color:var(--ink);font-weight:700;">${esc(pname(code))}<div style="font-size:10.5px;color:var(--ink-dim);">${code}${productMaster?.[code]?.cat?` · ${esc(productMaster[code].cat)}`:''}</div></td><td style="text-align:left;">${esc(p.sup)}</td><td class="hl-num">${p.n}</td><td style="text-align:left;">${topTypesTxt(p.types, 2)}</td><td style="text-align:left;">${claimLinks(p.items, 5)}</td></tr>`).join("")}
+  </table>` : `<div style="color:var(--ink-dim);font-size:12.5px;">상품코드가 기재된 공급사 클레임이 없습니다.</div>`;
+
+  // 4) 배송 클레임: 센터 × 유형
+  const centerRows = Object.entries(A.centers).sort((a,b)=>b[1].n-a[1].n);
+  const dTypes = Object.entries(centerRows.reduce((acc,[,c]) => { Object.entries(c.types).forEach(([t,n]) => acc[t]=(acc[t]||0)+n); return acc; }, {})).sort((a,b)=>b[1]-a[1]).map(([t])=>t).slice(0, 8);
+  const maxCell = Math.max(1, ...centerRows.flatMap(([,c]) => dTypes.map(t => c.types[t]||0)));
+  const headlines = centerRows.flatMap(([cn, c]) => Object.entries(c.types).map(([t,n]) => ({ cn, t, n, items: c.items.filter(it => it.claims.some(x => x.group==='배송클레임' && x.type===t)) }))).sort((a,b)=>b.n-a.n).slice(0, 6);
+  const deliveryHTML = centerRows.length ? `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+      ${headlines.map(h => `<div style="background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13px;"><b style="color:var(--ink);">${esc(h.cn)}</b> · ${esc(h.t)} <b style="color:${CLAIM_DEPTS.logi.color};">${h.n}건</b> <span style="margin-left:4px;">${claimLinks(h.items, 3)}</span></div>`).join("")}
+    </div>
+    <div style="overflow-x:auto;"><table style="font-size:12.5px;">
+      <tr><th style="text-align:left;">센터</th>${dTypes.map(t=>`<th>${esc(t)}</th>`).join("")}<th>합계</th><th>배송기사 귀책</th><th style="text-align:left;">상담 목록</th></tr>
+      ${centerRows.map(([cn, c]) => `<tr><td style="text-align:left;color:var(--ink);font-weight:600;">${esc(cn)}</td>
+        ${dTypes.map(t => { const v = c.types[t]||0; const a = v ? 0.15 + 0.7 * v / maxCell : 0; return `<td style="background:${v?`rgba(76,110,245,${a.toFixed(2)})`:'transparent'};color:${v?'#fff':'var(--ink-dim)'};font-weight:${v?700:400};">${v||'-'}</td>`; }).join("")}
+        <td class="hl-num">${c.n}</td><td style="color:var(--ink-dim);">${c.driver||'-'}</td>
+        <td style="text-align:left;"><details><summary style="cursor:pointer;font-size:12px;color:var(--ink-dim);">${c.items.length}건 보기</summary>${claimRowsTable(c.items, 20)}</details></td></tr>`).join("")}
+    </table></div>` : `<div style="color:var(--ink-dim);font-size:12.5px;">해당 기간 배송클레임이 없습니다.</div>`;
+  const fcHTML = Object.keys(A.fc).length ? `<div style="font-size:12.5px;margin-top:12px;"><b style="color:${CLAIM_DEPTS.fc.color};">FC배송(이천Hub·제때)</b> · ${topTypesTxt(A.fc, 6)} ${claimLinks((A.depts.fc?.items)||[], 6)}</div>` : '';
+
+  // 5) 전체 목록 (필터)
+  const groups = Object.keys(CLAIM_GROUP_COLORS);
+  const keys = [...new Set(items.flatMap(it => [it.supplier, it.r.center]).filter(Boolean))].sort();
+  window.__claimListRender = () => {
+    const q = (claimFilter.q||"").trim();
+    const f = items.filter(it => (!claimFilter.group || it.claims.some(c => c.group === claimFilter.group))
+      && (!claimFilter.key || it.supplier === claimFilter.key || it.r.center === claimFilter.key)
+      && (!q || [it.r.store, it.ask, it.supplier, it.r.center, it.codes.map(c=>pname(c)).join(" ")].join(" ").includes(q)));
+    return f.length ? claimRowsTable(f, 100) : `<div style="color:var(--ink-dim);font-size:12.5px;padding:8px 0;">조건에 맞는 클레임이 없습니다.</div>`;
+  };
+  const listHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+      <select style="${VIP_SEL_STYLE}" onchange="onClaimFilter('group', this.value)"><option value="">전체 유형</option>${groups.map(g2=>`<option value="${g2}" ${claimFilter.group===g2?'selected':''}>${g2}</option>`).join("")}</select>
+      <select style="${VIP_SEL_STYLE}" onchange="onClaimFilter('key', this.value)"><option value="">전체 공급사·센터</option>${keys.map(k=>`<option value="${esc(k)}" ${claimFilter.key===k?'selected':''}>${esc(k)}</option>`).join("")}</select>
+      <input type="search" placeholder="사업장·상품·문의 검색" value="${esc(claimFilter.q)}" oninput="onClaimFilter('q', this.value)" style="${VIP_SEL_STYLE}min-width:200px;">
+    </div>
+    <div id="claimList">${window.__claimListRender()}</div>`;
+
+  app.innerHTML = nav(picker) + `
+    <div style="font-size:15px;font-weight:700;margin:-6px 0 10px;">${claimPeriod==='daily'?'일간':claimPeriod==='weekly'?'주간':'월간'} · ${title} <span style="font-size:12px;font-weight:400;margin-left:6px;">${pmNote}</span></div>
+    ${kpis}
+    <div class="card" style="margin-bottom:16px;"><h2>클레임 추이<span class="tag">유형별 · 상담 기준</span></h2><canvas id="claimTrend" style="max-height:230px;"></canvas></div>
+
+    <div class="vip-sec"><span class="num">1</span>부서별 VOC</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:16px;">${deptCards}</div>
+
+    <div class="vip-sec"><span class="num">2</span>공급사 클레임 · 상품별</div>
+    <div class="grid2">
+      <div class="card"><h2>공급사별 클레임<span class="tag">공급사클레임 + 품질불량 · 공급사를 누르면 상품별로 펼쳐집니다</span></h2>${supTable}</div>
+      <div class="card"><h2>클레임 상품 TOP 10<span class="tag">상품코드 ↔ 상품정보 누적 매칭</span></h2><div style="overflow-x:auto;">${prodTable}</div></div>
+    </div>
+
+    <div class="vip-sec"><span class="num">3</span>배송 클레임 · 센터별</div>
+    <div class="card" style="margin-bottom:16px;"><h2>센터 × 이슈 유형<span class="tag">배송클레임 · 진할수록 많음 · 귀책: 센터(MFC) / 배송기사</span></h2>${deliveryHTML}${fcHTML}</div>
+
+    <div class="vip-sec"><span class="num">4</span>전체 클레임 목록</div>
+    <div class="card" style="margin-bottom:16px;"><h2>클레임 상세<span class="tag">유형·공급사/센터 필터 · 채널톡 바로가기</span></h2>${listHTML}</div>
+
+    <div class="footer-note">
+      분류 기준: CX Play Book 「채널톡_태그관리」 2depth — 공급사클레임·품질불량·FC배송·배송클레임·서비스이용클레임, 기타/유관부서전달. 한 상담에 여러 클레임 태그가 있으면 유형별로 각각 집계하고, 전체 건수는 상담 1건으로 셉니다.<br>
+      부서 배정: 공급사클레임·품질불량·코드오매칭 → 영업(MD·공급사) / 배송클레임 → 물류(센터·배송, "(배송기사)" 태그는 기사 귀책) / FC배송 → 물류(Hub·FC) / 결제·어플오류·발주누락 → 서비스·개발.<br>
+      상품: 상담 설명의 "코드: HERO-xxxxxx"를 OM_CX_VOC 관리 시트 「상품정보 누적」과 매칭합니다. 공급사는 "공급사/공급사명" 태그 기준입니다.
+    </div>`;
+
+  // 추이 차트
+  Chart.defaults.color = "#8B96AD"; Chart.defaults.borderColor = "#28324D";
+  const el = document.getElementById("claimTrend");
+  if (el){
+    const per = trendDates.map(d => claimAgg(allItems.filter(i => i.r.date === d)).groups);
+    charts.claimTrend = new Chart(el, { type:"bar",
+      data:{ labels: trendDates.map(d => dateLabel(d)), datasets: groups.map(g2 => ({ label: g2, data: per.map(x => x[g2]||0), backgroundColor: CLAIM_GROUP_COLORS[g2]+"CC", borderRadius:2, stack:"s" })) },
+      options:{ plugins:{ legend:{ position:"bottom", labels:{boxWidth:10} }, tooltip:{ mode:"index", intersect:false } }, scales:{ x:{ stacked:true, grid:{display:false} }, y:{ stacked:true, beginAtZero:true, grid:{color:"#28324D"} } } } });
+  }
+}
+
+
+// 메인 화면용 클레임 요약 카드 (상세는 🧾 클레임 VOC 화면)
+function buildClaimSummaryCard(rawLog, dates, label){
+  if (!(rawLog||[]).length) return "";
+  const dSet = new Set(dates);
+  const items = rawLog.filter(r => dSet.has(r.date)).map(parseClaimRow).filter(Boolean);
+  const A = claimAgg(items);
+  const sup = Object.entries(A.suppliers).sort((a,b)=>b[1].n-a[1].n).slice(0,3);
+  const cen = Object.entries(A.centers).flatMap(([cn,c]) => Object.entries(c.types).map(([t,n]) => [cn,t,n])).sort((a,b)=>b[2]-a[2]).slice(0,3);
+  return `<div class="card" style="margin-bottom:16px;">
+    <h2>클레임 VOC 요약<span class="tag">${label} · 채널톡 태그 기준</span></h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+      ${Object.entries(CLAIM_DEPTS).map(([k,d]) => `<div style="flex:1;min-width:130px;background:var(--panel-2);border-radius:10px;padding:10px 12px;border-left:3px solid ${d.color};"><div style="font-size:11.5px;color:var(--ink-dim);">${d.name}</div><div style="font-size:20px;font-weight:800;color:${A.depts[k]?.n?d.color:'var(--ink-dim)'};">${A.depts[k]?.n||0}<span style="font-size:12px;font-weight:500;color:var(--ink-dim);"> 건</span></div></div>`).join("")}
+    </div>
+    <div style="font-size:13px;line-height:1.9;">
+      ${sup.length?`<div>🏭 <b>공급사</b> · ${sup.map(([n,x])=>`${esc(n)} ${x.n}건(${topTypesTxt(x.types,1)})`).join(" · ")}</div>`:''}
+      ${cen.length?`<div>🚚 <b>배송</b> · ${cen.map(([cn,t,n])=>`${esc(cn)} ${esc(t)} ${n}건`).join(" · ")}</div>`:''}
+      ${!items.length?'<div style="color:var(--ink-dim);">해당 기간 클레임이 없습니다.</div>':''}
+    </div>
+    <button onclick="switchToClaim()" style="margin-top:8px;">🧾 클레임 상세 · 채널톡 링크 보기 →</button>
+  </div>`;
+}
 /* ===================== VIP CS 현황 (RAW "Tags" DF열 · VIP_4~6등급) ===================== */
 const VIP_GRADES = [4,5,6];
 const VIP_GRADE_COLORS = { 4:"#4C6EF5", 5:"#E8A33D", 6:"#E64980" };
@@ -2199,10 +2611,57 @@ function renderVip(data){
   }
 }
 
+/* ===================== 카드 접기/펼치기 (가독성) ===================== */
+// 모든 카드 제목을 누르면 접기/펼치기. 상태는 브라우저에 기억. MBO·상세성 카드는 기본 접힘.
+const CARD_DEFAULT_COLLAPSED = /MBO|상담원별 상세|일별 상세|생산성 점수|시간대별 통화 결과|발주 전환율|레터링|SKU|상관도|근무 스케줄|요일 및 시간별|담당자별 생산성|이슈 유형별 \(월간\)/;
+function cardStateLoad(){ try { return JSON.parse(localStorage.getItem("cardState")||"{}"); } catch(e){ return {}; } }
+function cardStateSave(st){ try { localStorage.setItem("cardState", JSON.stringify(st)); } catch(e){} }
+function cardTitleOf(h2){ const c = h2.cloneNode(true); c.querySelectorAll(".tag").forEach(t => t.remove()); return c.textContent.replace(/\s+/g," ").replace(/\d+\/\d+\([^)]*\)/g,"").trim(); }
+function resizeChartsSoon(){ setTimeout(() => Object.values(charts).forEach(c => { try { c && c.resize && c.resize(); } catch(e){} }), 30); }
+function enhanceCards(){
+  const app = document.getElementById("app"); if (!app) return;
+  const st = cardStateLoad();
+  const cards = [...app.querySelectorAll(".card")].filter(c => c.querySelector(":scope > h2") && !c.classList.contains("loading"));
+  cards.forEach(card => {
+    const h2 = card.querySelector(":scope > h2");
+    const key = viewMode + ":" + cardTitleOf(h2);
+    card.classList.add("collapsible");
+    const collapsed = key in st ? st[key] : CARD_DEFAULT_COLLAPSED.test(key);
+    card.classList.toggle("collapsed", collapsed);
+    h2.title = "눌러서 접기/펼치기";
+    h2.onclick = (e) => {
+      if (e.target.closest("a,button,select,input")) return;
+      const now = !card.classList.contains("collapsed");
+      card.classList.toggle("collapsed", now);
+      const s2 = cardStateLoad(); s2[key] = now; cardStateSave(s2);
+      if (!now) resizeChartsSoon();
+    };
+  });
+  const header = app.querySelector(":scope > header");
+  if (header && cards.length > 2 && !app.querySelector(".card-toolbar")){
+    const bar = document.createElement("div");
+    bar.className = "card-toolbar";
+    bar.innerHTML = `<span style="color:var(--ink-dim);align-self:center;">카드 제목을 누르면 접고 펼칠 수 있어요</span><button data-act="open">모두 펼치기</button><button data-act="close">모두 접기</button><button data-act="reset">기본 보기</button>`;
+    bar.onclick = (e) => {
+      const act = e.target.dataset?.act; if (!act) return;
+      const s2 = cardStateLoad();
+      cards.forEach(card => {
+        const key = viewMode + ":" + cardTitleOf(card.querySelector(":scope > h2"));
+        if (act === "reset"){ delete s2[key]; card.classList.toggle("collapsed", CARD_DEFAULT_COLLAPSED.test(key)); }
+        else { const c = act === "close"; s2[key] = c; card.classList.toggle("collapsed", c); }
+      });
+      cardStateSave(s2); resizeChartsSoon();
+    };
+    header.after(bar);
+  }
+}
+
 /* ===================== 렌더 ===================== */
-function render(data){
+function render(data){ renderCore(data); try { enhanceCards(); } catch(e){ console.warn("카드 접기 적용 실패", e); } }
+function renderCore(data){
   if (viewMode === "vip"){ renderVip(data); return; }
   if (viewMode === "cost"){ renderCost(data); return; }
+  if (viewMode === "claim"){ renderClaim(data); return; }
   if (viewMode === "weekly"){ renderWeekly(data); return; }
   if (viewMode === "monthly"){ renderMonthly(data); return; }
   const { dates, sections, totalRow, skuRow, schedule, outcall, delay30, delayHold, rawLog, onboardCalls } = data;
@@ -2253,6 +2712,10 @@ function render(data){
   const wowIdx = todayIdx - 7;
   const wowDate = dates[wowIdx];
   const inboundWow = wowDate!=null ? totalInboundOn(wowDate, totalRow, sections, agents, depMap) : null;
+  const callSecDaily = buildCallSection(data, [today], wowDate!=null ? [wowDate] : null, { periodLabel: dateLabel(today), prevLabel: "전주 동요일", canvasId: "chartCallDaily", trendDates: recentDates });
+  const callInToday = callSecDaily.callIn, callInWow = wowDate!=null ? callStats(rawLog, new Set([wowDate])).in : 0;
+  const unifiedToday = inboundToday + callInToday, unifiedWow = inboundWow!=null ? inboundWow + callInWow : null;
+  const unifiedWowDelta = unifiedWow ? (unifiedToday - unifiedWow) / unifiedWow : null;
   const wowDelta = inboundWow!=null && inboundWow>0 ? ((inboundToday-inboundWow)/inboundWow) : null;
 
   // 통화완료율 WoW
@@ -2563,6 +3026,7 @@ function render(data){
         ${issueToday ? `<span class="badge ${isUnderstaffed?'badge-bad':'badge-good'}">${issueToday}${totalStaffToday!=null?` (${totalStaffToday}/${minStaffToday}명)`:''}</span>` : ""}
         <input type="date" id="datePicker" value="${mdToISO(today)}" min="${mdToISO(dates[0])}" max="${mdToISO(dates[dates.length-1])}" onchange="onDateChange(this.value)">
         ${selectedDateOverride ? `<button onclick="resetToLatest()">최신으로</button>` : ""}
+        <button onclick="switchToClaim()" style="background:#F0555B;color:#fff;font-weight:700;border:none;">🧾 클레임 VOC</button>
         <button onclick="switchToVip()" class="vip-btn">👑 VIP CS 현황</button>
         <button onclick="switchToCost()" style="background:#4C6EF5;color:#fff;font-weight:700;border:none;">💳 채널톡 비용</button>
         <button onclick="switchToWeekly()" style="background:var(--accent);color:#1a1206;font-weight:600;border:none;">주간 리포트 보기</button>
@@ -2581,8 +3045,9 @@ function render(data){
     </div>
 
     <div class="kpis">
-      <div class="kpi"><div class="label">${dateLabel(today)} 상담인입</div><div class="val">${fmtNum(inboundToday)}</div>
-        <div class="delta ${wowDelta==null?'':(wowDelta>=0?'up':'down')}">${wowDelta!=null ? (wowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(wowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+      <div class="kpi"><div class="label">${dateLabel(today)} 상담인입 <span style="font-size:11px;">(채팅+CALL)</span></div><div class="val">${fmtNum(unifiedToday)}</div>
+        <div style="font-size:11.5px;color:var(--ink-dim);margin-top:2px;">💬 채팅 ${fmtNum(inboundToday)} · 📞 CALL ${fmtNum(callInToday)}${(rawLog||[]).length?'':' (RAW 로딩 중)'}</div>
+        <div class="delta ${unifiedWowDelta==null?'':(unifiedWowDelta>=0?'up':'down')}">${unifiedWowDelta!=null ? (unifiedWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(unifiedWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
         ${depToday>0 ? `<div class="delta" style="font-size:10.5px;">Carol·Zenze(퇴사) RAW 보정 +${fmtNum(depToday)}건 포함</div>` : ''}</div>
       <div class="kpi"><div class="label">CS처리율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
@@ -2601,6 +3066,9 @@ function render(data){
         <div class="delta ${absentDelta==null?'':(absentDelta<=0?'up':'down')}">${absentDelta!=null ? (absentDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
         <div class="delta" style="font-size:10.5px;">부재율 ${absentRateDelta!=null ? (absentRateDelta<=0?'▼ ':'▲ ')+Math.abs(Math.round(absentRateDelta*100))+'%p' : '-'} · 목표 미설정(참고)</div></div>
     </div>
+
+    ${callSecDaily.html}
+    ${buildClaimSummaryCard(rawLog, [today], dateLabel(today))}
 
     <div class="grid1">
       <div class="card">
@@ -2932,6 +3400,7 @@ function render(data){
 
   const recentTotalsWithDep = recentDates.map(d => totalInboundOn(d, totalRow, sections, agents, depMap));
   drawCharts({ dates: recentDates, sections, agents, today, outcall, weekKeys: allWeekKeys, weeklyByCategory, issueTodayRanking, weeklyByIssue, issueWeekKeys, hourlyToday, productivityScores, mboTrend, recentTotalsWithDep });
+  callSecDaily.draw();
   startCountdown();
 
   lastCtx = { dates: recentDates, sections, agents, today, yday, schedule, outcall, delay30, delayHold, targetCompletedToday, DELAY_PENALTY, rawLog };
@@ -2983,6 +3452,7 @@ function renderWeekly(data){
   }
   const cx = cxStats(week);
   const cxPrev = cxStats(prevWeek);
+  const callSecW = buildCallSection(data, week.dates, prevWeek?.dates, { periodLabel: dateRangeLabel(week.monday, week.saturday), prevLabel: "전주", canvasId: "chartCallWeek" });
 
   function outcallWeekStats(w){
     if (!w || !outcall?.categories?.length) return [];
@@ -3185,6 +3655,7 @@ function renderWeekly(data){
         <select id="weekPicker" onchange="onWeekChange(this.value)" style="background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;">
           ${weekOptions}
         </select>
+        <button onclick="switchToClaim()" style="background:#F0555B;color:#fff;font-weight:700;border:none;">🧾 클레임 VOC</button>
         <button onclick="switchToVip()" class="vip-btn">👑 VIP CS 현황</button>
         <button onclick="switchToCost()" style="background:#4C6EF5;color:#fff;font-weight:700;border:none;">💳 채널톡 비용</button>
         <button onclick="switchToMonthly()" style="background:#748FFC;color:#0F1420;font-weight:600;border:none;">월별 보기</button>
@@ -3202,7 +3673,7 @@ function renderWeekly(data){
     <div class="card" style="margin-bottom:16px;">
       <h2>채널톡 인입 및 응대현황</h2>
       <div class="kpis">
-        <div class="kpi"><div class="label">상담인입 (채널톡/Call)</div><div class="val">${fmtNum(cx?.inbound)}</div></div>
+        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecW.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecW.callIn)}</div></div>
         <div class="kpi"><div class="label">응대현황 (상담완료)</div><div class="val">${fmtNum(cx?.completed)}</div></div>
         <div class="kpi"><div class="label">응대율</div><div class="val">${fmtPct(cx?.rate)}</div></div>
       </div>
@@ -3215,6 +3686,9 @@ function renderWeekly(data){
         <canvas id="chartWeekDaily"></canvas>
       </div>
     </div>
+
+    ${callSecW.html}
+    ${buildClaimSummaryCard(rawLog, week.dates, dateRangeLabel(week.monday, week.saturday))}
 
     <div class="card" style="margin-bottom:16px;">
       <h2>CX 아웃콜 운영현황 <span class="tag">성공률 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
@@ -3405,6 +3879,7 @@ function renderWeekly(data){
   `;
 
   destroyCharts();
+  callSecW.draw();
   {
     const supTop = Object.entries(qualityWeek.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,8);
     charts.qSupW = drawBarChart("chartQualitySupplierW", supTop.map(([s])=>s), supTop.map(([,v])=>v.total), "#E8A33DAA", true);
@@ -3463,6 +3938,7 @@ function renderMonthly(data){
   }
   const cx = cxStats(month.dates);
   const cxPrev = cxStats(prevMonth?.dates);
+  const callSecM = buildCallSection(data, month.dates, prevMonth?.dates, { periodLabel: month.label, prevLabel: "전월", canvasId: "chartCallMonth" });
 
   function outcallStats(dSet){
     if (!dSet || !outcall?.categories?.length) return [];
@@ -3691,6 +4167,7 @@ function renderMonthly(data){
         <select id="monthPicker" onchange="onMonthChange(this.value)" style="background:var(--panel-2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:8px;font-size:12px;">
           ${monthOptions}
         </select>
+        <button onclick="switchToClaim()" style="background:#F0555B;color:#fff;font-weight:700;border:none;">🧾 클레임 VOC</button>
         <button onclick="switchToVip()" class="vip-btn">👑 VIP CS 현황</button>
         <button onclick="switchToCost()" style="background:#4C6EF5;color:#fff;font-weight:700;border:none;">💳 채널톡 비용</button>
         <button onclick="switchToWeekly()" style="background:var(--accent);color:#1a1206;font-weight:600;border:none;">주간 보기</button>
@@ -3708,7 +4185,7 @@ function renderMonthly(data){
     <div class="card" style="margin-bottom:16px;">
       <h2>채널톡 인입 및 응대현황 (월간)</h2>
       <div class="kpis">
-        <div class="kpi"><div class="label">상담인입 (채널톡/Call)</div><div class="val">${fmtNum(cx?.inbound)}</div></div>
+        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecM.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecM.callIn)}</div></div>
         <div class="kpi"><div class="label">응대현황 (상담완료)</div><div class="val">${fmtNum(cx?.completed)}</div></div>
         <div class="kpi"><div class="label">응대율</div><div class="val">${fmtPct(cx?.rate)}</div></div>
       </div>
@@ -3721,6 +4198,9 @@ function renderMonthly(data){
         <canvas id="chartMonthDaily"></canvas>
       </div>
     </div>
+
+    ${callSecM.html}
+    ${buildClaimSummaryCard(rawLog, month.dates, month.label)}
 
     <div class="card" style="margin-bottom:16px;">
       <h2>주차별 인입 비교 <span class="tag">${month.label} 내 주차별</span></h2>
@@ -4012,6 +4492,7 @@ function renderMonthly(data){
   `;
 
   destroyCharts();
+  callSecM.draw();
   {
     const supTopM = Object.entries(qualityMonth.bySupplier).sort((a,b)=>b[1].total-a[1].total).slice(0,8);
     charts.qSupM = drawBarChart("chartQualitySupplierM", supTopM.map(([s])=>s), supTopM.map(([,v])=>v.total), "#E8A33DAA", true);
