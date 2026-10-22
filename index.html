@@ -1885,11 +1885,13 @@ ${dlt(curT, prevT)}${COST_MONTH_NOTES[sel]?`<div style="font-size:11px;color:var
 /* ===================== 채팅 · CALL 인입 (RAW tags: CALL/CALL/인바운드·아웃바운드) ===================== */
 // 시트(CS_Tracking) 상담인입 = 채팅 상담 기준. 전화 인바운드(CALL/CALL/인바운드)는 대부분 담당자 미배정이라 시트에 잡히지 않아 RAW로 별도 집계해 "통합 인입"에 더한다.
 const CALL_IN_RE = /CALL\/CALL\/인바운드/, CALL_OUT_RE = /CALL\/CALL\/아웃바운드/;
+const CALL_EXCLUDED_AGENTS = ["songsong"]; // 채팅·CALL 인입 현황 집계에서 제외할 인원
 const CALL_MISSED_LABEL = { wfEndCall:"ARS(워크플로우) 종료", userLeftInQueued:"대기 중 고객 이탈", userLeftInWaitingManager:"상담원 연결 대기 중 이탈", notInOperation:"운영시간 외", wfInputTimeout:"ARS 입력 시간초과" };
 function callStats(rawLog, dateSet){
   const s = { in:0, inConnected:0, inMissed:0, out:0, byAgent:{}, missedReasons:{}, byDate:{} };
   (rawLog||[]).forEach(r => {
     if (dateSet && !dateSet.has(r.date)) return;
+    if (CALL_EXCLUDED_AGENTS.includes(r.agent)) return;
     const isIn = CALL_IN_RE.test(r.tags||""), isOut = CALL_OUT_RE.test(r.tags||"");
     if (!isIn && !isOut) return;
     const a = r.agent || "미연결";
@@ -1950,7 +1952,7 @@ ${cmp(st.in, pst?.in)}</div>
               <td>${r.c==null?'<span style="color:var(--ink-dim);" title="CS_Tracking 시트에 행 없음">-</span>':fmtNum(r.c)}</td><td>${fmtNum(r.ci)}</td><td>${fmtNum(r.co)}</td><td class="hl-num">${fmtNum(r.t)}</td></tr>`).join("")}
             <tr style="border-top:2px solid var(--line);"><td style="color:var(--ink);font-weight:700;">합계</td><td class="hl-num">${fmtNum(chat)}</td><td class="hl-num">${fmtNum(sum(rowsA.map(r=>r.ci)))}</td><td class="hl-num">${fmtNum(sum(rowsA.map(r=>r.co)))}</td><td class="hl-num">${fmtNum(chat + sum(rowsA.map(r=>r.ci)))}</td></tr>
           </table>
-          <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;">채팅 인입 합계는 시트 상담인입_Total 기준(퇴사자 보정 포함)이라 담당자 합과 다를 수 있습니다. songsong 등 시트에 행이 없는 인원은 CALL만 표시됩니다.</div>
+          <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;">채팅 인입 합계는 시트 상담인입_Total 기준(퇴사자 보정 포함)이라 담당자 합과 다를 수 있습니다. songsong은 이 카드 집계에서 제외합니다.</div>
         </div>
         <div><canvas id="${opts.canvasId}" style="max-height:260px;"></canvas></div>
       </div>`}
@@ -1969,7 +1971,7 @@ ${cmp(st.in, pst?.in)}</div>
         scales:{ x:{ stacked:true, grid:{display:false}, ticks:{ color: (c) => { const d = xs[c.index]; return d && weekdayOf(d)===0 ? "#F0555B" : "#8B96AD"; } } }, y:{ stacked:true, beginAtZero:true, grid:{color:"#28324D"} } } }
     });
   };
-  return { html, draw, total, chat, callIn: st.in, stats: st };
+  return { html, draw, total, chat, callIn: st.in, stats: st, ptotal: (pst && hasRaw) ? ptotal : null };
 }
 
 /* ===================== 클레임 VOC (CX Play Book 채널톡 태그관리 기준 · 이사님 보고용 심플 뷰) ===================== */
@@ -3029,7 +3031,8 @@ function renderCore(data){
     <div class="kpis">
       <div class="kpi"><div class="label">${dateLabel(today)} 상담인입 <span style="font-size:11px;">(채팅+CALL)</span></div><div class="val">${fmtNum(unifiedToday)}</div>
         <div style="font-size:11.5px;color:var(--ink-dim);margin-top:2px;">💬 채팅 ${fmtNum(inboundToday)} · 📞 CALL ${fmtNum(callInToday)}${(rawLog||[]).length?'':' (RAW 로딩 중)'}</div>
-        <div class="delta ${unifiedWowDelta==null?'':(unifiedWowDelta>=0?'up':'down')}">${unifiedWowDelta!=null ? (unifiedWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(unifiedWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
+        <div class="delta ${unifiedWowDelta==null?'':(unifiedWowDelta>=0?'up':'down')}">${unifiedWowDelta!=null ? `전주 동요일 대비 ${unifiedToday-unifiedWow>=0?'▲':'▼'} ${fmtNum(Math.abs(unifiedToday-unifiedWow))}건 (${unifiedWowDelta>=0?'+':'-'}${Math.abs(Math.round(unifiedWowDelta*100))}%)` : '전주 데이터 없음'}</div>
+        ${unifiedWow!=null ? `<div style="font-size:11px;color:var(--ink-dim);">전주 동요일(${dateLabel(wowDate)}) ${fmtNum(unifiedWow)}건</div>` : ''}
         ${depToday>0 ? `<div class="delta" style="font-size:10.5px;">Carol·Zenze(퇴사) RAW 보정 +${fmtNum(depToday)}건 포함</div>` : ''}</div>
       <div class="kpi"><div class="label">CS처리율</div><div class="val">${fmtPct(completeRateToday)}</div>
         <div class="delta ${completeRateDelta==null?'':(completeRateDelta>=0?'up':'down')}">${completeRateDelta!=null ? (completeRateDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(completeRateDelta*100))+'%p (전주 동요일 대비)' : '전주 데이터 없음'}</div></div>
@@ -3655,7 +3658,7 @@ function renderWeekly(data){
     <div class="card" style="margin-bottom:16px;">
       <h2>채널톡 인입 및 응대현황</h2>
       <div class="kpis">
-        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecW.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecW.callIn)}</div></div>
+        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecW.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecW.callIn)}</div>${(() => { const cur = (cx?.inbound||0) + callSecW.callIn, pv = callSecW.ptotal; if (pv == null) return ''; const d = cur - pv; return `<div class="delta ${d>=0?'up':'down'}">전주 대비 ${d>=0?'▲':'▼'} ${fmtNum(Math.abs(d))}건${pv?` (${d>=0?'+':'-'}${Math.abs(Math.round(d/pv*100))}%)`:''} · 전주 ${fmtNum(pv)}건</div>`; })()}</div>
         <div class="kpi"><div class="label">응대현황 (상담완료)</div><div class="val">${fmtNum(cx?.completed)}</div></div>
         <div class="kpi"><div class="label">응대율</div><div class="val">${fmtPct(cx?.rate)}</div></div>
       </div>
@@ -4167,7 +4170,7 @@ function renderMonthly(data){
     <div class="card" style="margin-bottom:16px;">
       <h2>채널톡 인입 및 응대현황 (월간)</h2>
       <div class="kpis">
-        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecM.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecM.callIn)}</div></div>
+        <div class="kpi"><div class="label">상담인입 (채팅+CALL)</div><div class="val">${fmtNum((cx?.inbound||0) + callSecM.callIn)}</div><div style="font-size:11.5px;color:var(--ink-dim);margin-top:4px;">💬 채팅 ${fmtNum(cx?.inbound)} · 📞 CALL ${fmtNum(callSecM.callIn)}</div>${(() => { const cur = (cx?.inbound||0) + callSecM.callIn, pv = callSecM.ptotal; if (pv == null) return ''; const d = cur - pv; return `<div class="delta ${d>=0?'up':'down'}">전월 대비 ${d>=0?'▲':'▼'} ${fmtNum(Math.abs(d))}건${pv?` (${d>=0?'+':'-'}${Math.abs(Math.round(d/pv*100))}%)`:''} · 전월 ${fmtNum(pv)}건</div>`; })()}</div>
         <div class="kpi"><div class="label">응대현황 (상담완료)</div><div class="val">${fmtNum(cx?.completed)}</div></div>
         <div class="kpi"><div class="label">응대율</div><div class="val">${fmtPct(cx?.rate)}</div></div>
       </div>
