@@ -2040,7 +2040,7 @@ async function loadProductMaster(){
     } catch(e2){ productMasterError = e2.message; console.warn("상품정보 시트 로드 실패:", e2.message); }
   }
   productMasterLoading = false;
-  if (viewMode === "claim" && lastLoadedData) quietRender();
+  if (lastLoadedData && productMaster && viewMode !== "cost" && viewMode !== "vip") quietRender(); // 상품명으로 다시 표시(급증 인사이트·클레임 요약 포함)
 }
 function productName(code){ return productMaster?.[code]?.name || code; }
 function switchToClaim(){ viewMode = "claim"; window.scrollTo(0,0); if (lastLoadedData) render(lastLoadedData); loadProductMaster(); }
@@ -2083,6 +2083,7 @@ function openClaimModal(kind, key){
   const ctx = window.__claimCtx; if (!ctx) return;
   let items, title, color;
   if (kind === "type"){ const [area, type] = key.split("|"); items = ctx.cur[area].types[type] || []; title = `${CLAIM_AREA_MAP[area].icon} ${type}`; color = CLAIM_AREA_MAP[area].color; }
+  else if (kind === "spike"){ const sp = (window.__claimSpikes||[])[key]; if (!sp) return; items = sp.items; title = `⚡ ${sp.label}`; color = "#F0555B"; kind = "type"; key = sp.area + "|"; }
   else { const pg = (window.__claimProd||[])[key]; if (!pg) return; items = pg.items; title = `📦 ${pg.name} · ${pg.sup}`; color = CLAIM_AREA_MAP.supplier.color; }
   items = items.slice().sort((a,b) => (vipMdKey(b.r.date)*100 + b.r.hour) - (vipMdKey(a.r.date)*100 + a.r.hour));
   const top = (f) => { const m = {}; items.forEach(it => { const k = f(it); if (k) m[k] = (m[k]||0) + 1; }); return Object.entries(m).sort((a,b)=>b[1]-a[1]); };
@@ -2188,6 +2189,7 @@ function renderClaim(data){
   const items = allItems.filter(i => curSet.has(i.r.date));
   const cur = bucketCounts[bucketCounts.length-1], prev = bucketCounts.length > 1 ? bucketCounts[bucketCounts.length-2] : null;
   window.__claimCtx = { cur, items };
+  const spikeHTML = buildSpikeCardHTML(detectClaimSpikes(allItems, buckets), title, claimPeriod !== "daily", claimPeriod==='daily' ? "직전 4영업일" : claimPeriod==='weekly' ? "직전 4주" : "직전 월", false);
   const totalCur = items.length;
   const totalPrev = prev ? (() => { const s = new Set(buckets[buckets.length-2].dates); return allItems.filter(i => s.has(i.r.date)).length; })() : null;
 
@@ -2247,6 +2249,7 @@ function renderClaim(data){
   app.innerHTML = nav(picker) + `
     <div style="font-size:15px;font-weight:700;margin:-6px 0 10px;">${claimPeriod==='daily'?'일간':claimPeriod==='weekly'?'주간':'월간'} · ${title}</div>
     ${kpis}
+    ${spikeHTML}
     ${areaHTML}
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.supplier.color};"><h2>📦 클레임 상품 TOP 10<span class="tag">공급사 클레임 · 상품별 유형 건수${pmNote} · 누르면 채널톡 링크</span></h2>${prodHTML}</div>
     <div class="footer-note">
@@ -2256,9 +2259,103 @@ function renderClaim(data){
     </div>`;
 }
 
+/* ---- 클레임 급증 인사이트: "어느 날, 어느 공급사(센터)에서, 어떤 클레임이 평소보다 갑자기 늘었나" ---- */
+// 기준: 이번 기간 건수 vs 직전 기간들(최대 4개) 평균. 3건 이상 & 평소의 2배 이상(또는 평소 0건) & 2건 이상 증가 → 급증
+const SPIKE_MIN = 3, SPIKE_RATIO = 2, SPIKE_DIFF = 2;
+const SPIKE_DEPT = { supplier:{ name:"영업·MD", color:"#E8A33D" }, delivery:{ name:"물류·센터", color:"#4C6EF5" }, service:{ name:"서비스·개발", color:"#BE4BDB" }, etc:{ name:"유관부서", color:"#20C997" } };
+function detectClaimSpikes(allItems, buckets){
+  if (!buckets || buckets.length < 2) return [];
+  const bi = {}; buckets.forEach((b, i) => b.dates.forEach(d => bi[d] = i));
+  const cur = buckets.length - 1, prevN = Math.min(4, cur);
+  const groups = {}; // key -> { area, label, counts[], items(cur), types{} }
+  const add = (key, area, label, it, type) => {
+    const i = bi[it.r.date]; if (i == null) return;
+    const g = groups[key] = groups[key] || { key, area, label, counts: buckets.map(() => 0), seen: buckets.map(() => new Set()), items: [], types:{}, typeSeen: new Set() };
+    if (!g.seen[i].has(it)){ g.seen[i].add(it); g.counts[i]++; if (i === cur) g.items.push(it); }
+    if (i === cur && type){ const tk = it.r.url + "|" + it.r.date + it.r.hour + it.r.store + "|" + type; if (!g.typeSeen.has(tk)){ g.typeSeen.add(tk); g.types[type] = (g.types[type]||0) + 1; } }
+  };
+  allItems.forEach(it => {
+    if (bi[it.r.date] == null) return;
+    it.claims.forEach(c => {
+      if (c.area === "supplier"){
+        const sup = normalizeSupplier(it.supplier || "") || "공급사 미기재";
+        add(`S|${sup}`, "supplier", sup, it, c.type);
+        const names = [...new Set(it.codes.map(productName))];
+        names.forEach(n => add(`P|${sup}|${n}`, "supplier", `${sup} · ${n}`, it, c.type));
+      } else if (c.area === "delivery"){
+        const cen = it.r.center || "센터 미기재";
+        add(`D|${cen}|${c.type}`, "delivery", `${cen} · ${c.type}`, it, c.type);
+      } else {
+        add(`${c.area}|${c.type}`, c.area, c.type, it, c.type);
+      }
+    });
+  });
+  const out = [];
+  Object.values(groups).forEach(g => {
+    const now = g.counts[cur];
+    const base = g.counts.slice(cur - prevN, cur).reduce((a,b)=>a+b, 0) / prevN;
+    if (now >= SPIKE_MIN && now - base >= SPIKE_DIFF && (base === 0 || now >= base * SPIKE_RATIO)){
+      const byDay = {}; g.items.forEach(it => byDay[it.r.date] = (byDay[it.r.date]||0) + 1);
+      const peak = Object.entries(byDay).sort((a,b)=>b[1]-a[1])[0];
+      out.push({ ...g, now, base, ratio: base ? now / base : null, peak, level: g.key[0] });
+    }
+  });
+  // 같은 공급사에서 상품 급증이 잡히면 공급사 전체 줄은 생략 (중복 방지)
+  const prodSup = new Set(out.filter(x => x.level === "P").map(x => x.key.split("|")[1]));
+  return out.filter(x => !(x.level === "S" && prodSup.has(x.key.split("|")[1])))
+            .sort((a,b) => (b.now - b.base) - (a.now - a.base) || b.now - a.now).slice(0, 10);
+}
+function spikeSentence(s, multiDay){
+  const tl = Object.entries(s.types).sort((a,b)=>b[1]-a[1]).slice(0,2);
+  const types = (tl.length === 1 && s.label.endsWith(tl[0][0])) ? "" : tl.map(([t,n]) => `${t} ${n}`).join(" · "); // 라벨에 이미 유형이 있으면 생략
+  const base = s.base ? `평소 ${s.base.toFixed(1)}건 → ${s.now}건 (${(s.now/s.base).toFixed(1)}배)` : `평소 0건 → ${s.now}건 (신규)`;
+  const when = multiDay && s.peak ? ` · <b>${dateLabel(s.peak[0])}</b>에 ${s.peak[1]}건 집중` : "";
+  return { types, base, when };
+}
+function spikeShareText(spikes, title, multiDay){
+  return `[클레임 급증 알림] ${title}\n` + spikes.map((s, i) => { const t = spikeSentence(s, multiDay); return `${i+1}) [${SPIKE_DEPT[s.area].name}] ${s.label} — ${t.types} / ${t.base.replace(/<[^>]+>/g,"")}${t.when.replace(/<[^>]+>/g,"")}`; }).join("\n");
+}
+function copyClaimSpikes(){
+  const txt = window.__claimSpikeText || ""; if (!txt) return;
+  const done = () => { const b = document.getElementById("spikeCopyBtn"); if (b){ b.textContent = "✅ 복사됨"; setTimeout(() => b.textContent = "📋 공유용 텍스트 복사", 1800); } };
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done).catch(() => { prompt("아래 내용을 복사하세요", txt); });
+  else prompt("아래 내용을 복사하세요", txt);
+}
+function buildSpikeCardHTML(spikes, title, multiDay, prevLabel, compact){
+  window.__claimSpikes = spikes;
+  window.__claimSpikeText = spikes.length ? spikeShareText(spikes, title, multiDay) : "";
+  const rows = spikes.slice(0, compact ? 3 : 10).map((s, i) => { const t = spikeSentence(s, multiDay); const d = SPIKE_DEPT[s.area];
+    return `<div ${compact ? '' : `onclick="openClaimModal('spike',${i})"`} style="display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);${compact?'':'cursor:pointer;'}">
+      <span style="flex-shrink:0;font-size:11px;font-weight:700;border-radius:5px;padding:2px 7px;background:${d.color}26;color:${d.color};">${d.name}</span>
+      <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;"><b style="color:var(--ink);">${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(t.types)}</span><br>
+        <span style="color:var(--bad);font-weight:700;">▲ ${t.base}</span><span style="color:var(--ink-dim);">${t.when}</span></div>
+      ${compact ? '' : '<span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span>'}
+    </div>`; }).join("");
+  return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F0555B;">
+    <h2>⚡ 클레임 급증 인사이트<span class="tag">${title} · ${prevLabel} 평균 대비 2배↑ & 3건↑ · 담당 부서 표시</span></h2>
+    ${spikes.length ? rows : `<div style="font-size:13px;color:var(--good);padding:6px 0;">✅ 평소보다 급증한 클레임이 없습니다.</div>`}
+    ${spikes.length && !compact ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;"><button id="spikeCopyBtn" onclick="copyClaimSpikes()">📋 공유용 텍스트 복사</button><span style="font-size:11.5px;color:var(--ink-dim);align-self:center;">메신저·메일로 유관부서에 그대로 붙여 넣을 수 있어요</span></div>` : ''}
+  </div>`;
+}
+// 메인 화면용: 기간에 맞는 비교 구간 생성
+function spikeBucketsFor(rawLog, dates){
+  const allDates = [...new Set(rawLog.map(r => r.date))].sort((a,b)=>vipMdKey(a)-vipMdKey(b));
+  if (dates.length === 1){
+    const work = allDates.filter(d => weekdayOf(d) !== 0 && vipMdKey(d) < vipMdKey(dates[0])).slice(-4);
+    return work.map(d => ({ label:d, dates:[d] })).concat([{ label:dates[0], dates }]);
+  }
+  const first = dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b))[0];
+  const weeks = buildWeekList(allDates);
+  const isWeek = dates.length <= 7;
+  const list = isWeek ? weeks.map(w => ({ label:w.monday, dates:w.dates })) : buildMonthList(allDates).map(m => ({ label:m.label, dates:m.dates }));
+  const idx = list.findIndex(b => b.dates.includes(first));
+  return idx < 0 ? [] : list.slice(Math.max(0, idx-4), idx+1);
+}
+
 // 메인 화면용 클레임 요약 카드 (상세는 🧾 클레임 VOC 화면)
 function buildClaimSummaryCard(rawLog, dates, label){
   if (!(rawLog||[]).length) return "";
+  if (!productMaster && !productMasterLoading && !productMasterError) setTimeout(loadProductMaster, 0); // 상품명 매핑은 백그라운드에서 1회 로드
   const dSet = new Set(dates);
   const items = rawLog.filter(r => dSet.has(r.date)).map(parseClaimRow).filter(Boolean);
   const cnt = claimCount(items);
@@ -2272,6 +2369,7 @@ function buildClaimSummaryCard(rawLog, dates, label){
         <div style="font-size:12px;color:var(--ink);margin-top:2px;">${t.length ? t.map(([k,v]) => `${esc(k)} ${v.length}`).join(" · ") : '<span style="color:var(--ink-dim);">-</span>'}</div>
       </div>`).join("")}
     </div>
+    ${(() => { const all = rawLog.map(parseClaimRow).filter(Boolean); const sp = detectClaimSpikes(all, spikeBucketsFor(rawLog, dates)); return sp.length ? `<div style="margin-top:12px;font-size:12.5px;font-weight:700;color:var(--bad);">⚡ 급증 이슈 TOP ${Math.min(3, sp.length)}</div>` + sp.slice(0,3).map(s => { const t = spikeSentence(s, dates.length > 1); const d = SPIKE_DEPT[s.area]; return `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--line);"><span style="font-size:11px;font-weight:700;color:${d.color};margin-right:6px;">${d.name}</span><b>${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(t.types)}</span> · <span style="color:var(--bad);">▲ ${t.base}</span>${t.when}</div>`; }).join("") : ''; })()}
     <button onclick="switchToClaim()" style="margin-top:12px;">🧾 클레임 VOC 상세 보기 →</button>
   </div>`;
 }
