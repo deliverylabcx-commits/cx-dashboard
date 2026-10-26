@@ -1985,7 +1985,7 @@ const CLAIM_AREAS = [
   { key:"etc",      name:"기타",          icon:"📎", color:"#20C997", desc:"유관부서 전달" },
 ];
 const CLAIM_AREA_MAP = Object.fromEntries(CLAIM_AREAS.map(a => [a.key, a]));
-let productMaster = null, productMasterLoading = false, productMasterError = null;
+let productMaster = null, productMasterLoading = false, productMasterError = null, productMasterSource = "";
 let claimPeriod = "weekly", claimSelDate = null, claimSelWeek = null, claimSelMonth = null;
 
 function esc(v){ return String(v==null?"":v).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
@@ -2019,15 +2019,26 @@ function parseClaimRow(r){
   const codes = [...new Set(((r.desc||"").match(/HERO-[0-9A-Z]{6}/gi) || []).map(c => c.toUpperCase()))];
   return { r, claims, supplier, codes };
 }
+// 상품 매핑: ① 대시보드와 같이 올린 product_map.json(운영툴 API product_view 추출본) → ② 임시 상품 매칭 시트
 async function loadProductMaster(){
   if (productMaster || productMasterLoading) return;
   productMasterLoading = true;
   try {
-    const rows = Papa.parse((await fetchCSV(PRODUCT_MASTER_URL)).trim()).data;
+    const res = await fetch("product_map.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error("product_map.json " + res.status);
+    const j = await res.json();
     const m = {};
-    rows.slice(1).forEach(x => { const code = (x[0]||"").trim().toUpperCase(); if (/^HERO-/.test(code)) m[code] = { dist:(x[1]||"").trim(), name:(x[2]||"").trim(), cat:(x[4]||"").trim() }; });
-    productMaster = m;
-  } catch(e){ productMasterError = e.message; console.warn("상품정보 시트 로드 실패:", e.message); }
+    Object.entries(j.p || {}).forEach(([k, v]) => { m["HERO-" + k] = { name: v[0], dist: (j.s || [])[v[1]] || "", cat: "" }; });
+    productMaster = m; productMasterSource = `운영툴 API (${j.v || ""})`;
+  } catch(e){
+    console.warn("product_map.json 사용 불가 - 상품 매칭 시트로 대체:", e.message);
+    try {
+      const rows = Papa.parse((await fetchCSV(PRODUCT_MASTER_URL)).trim()).data;
+      const m = {};
+      rows.slice(1).forEach(x => { const code = (x[0]||"").trim().toUpperCase(); if (/^HERO-/.test(code)) m[code] = { dist:(x[1]||"").trim(), name:(x[2]||"").trim(), cat:(x[4]||"").trim() }; });
+      productMaster = m; productMasterSource = "상품 매칭 시트";
+    } catch(e2){ productMasterError = e2.message; console.warn("상품정보 시트 로드 실패:", e2.message); }
+  }
   productMasterLoading = false;
   if (viewMode === "claim" && lastLoadedData) quietRender();
 }
@@ -2231,7 +2242,7 @@ function renderClaim(data){
       <div style="font-size:18px;font-weight:800;">${p.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;">상세 ›</span>
     </div>`).join("") : `<div style="color:var(--ink-dim);font-size:13px;">상품코드가 기재된 공급사 클레임이 없습니다.</div>`;
-  const pmNote = productMaster ? "" : productMasterError ? " · 상품정보를 불러오지 못해 코드로 표시" : " · 상품명 매칭 중…";
+  const pmNote = productMaster ? ` · 상품정보: ${productMasterSource}` : productMasterError ? " · 상품정보를 불러오지 못해 코드로 표시" : " · 상품명 매칭 중…";
 
   app.innerHTML = nav(picker) + `
     <div style="font-size:15px;font-weight:700;margin:-6px 0 10px;">${claimPeriod==='daily'?'일간':claimPeriod==='weekly'?'주간':'월간'} · ${title}</div>
