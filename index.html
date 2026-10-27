@@ -2199,6 +2199,7 @@ function renderClaim(data){
   const repeatEnd = buckets[buckets.length-1].dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b)).pop();
   const repeatData = detectRepeatStores(allItems, repeatEnd);
   const repeatHTML = buildRepeatStoreCardHTML(repeatData, repeatEnd);
+  const wdHTML = buildWeekdayClaimCard(allItems, allDates, repeatEnd, claimPeriod === "monthly" ? buckets[buckets.length-1].dates : null, title);
   const reviewHTML = buildClaimReviewBarHTML(spikeList, repeatData, { title, prevLabel: spikePrev, endMd: repeatEnd, multiDay: claimPeriod !== "daily" });
   const totalCur = items.length;
   const totalPrev = prev ? (() => { const s = new Set(buckets[buckets.length-2].dates); return allItems.filter(i => s.has(i.r.date)).length; })() : null;
@@ -2250,7 +2251,7 @@ function renderClaim(data){
     <div onclick="openClaimModal('product',${i})" style="display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
       <b style="width:22px;color:${i<3?CLAIM_AREA_MAP.supplier.color:'var(--ink-dim)'};">${i+1}</b>
       <div style="flex:1;min-width:0;"><div style="font-weight:700;color:var(--ink);">${esc(p.name)} <span style="font-size:11.5px;color:var(--ink-dim);font-weight:400;">· ${esc(p.sup)}</span></div>
-        <div style="margin-top:3px;">${codeChipsHTML(codeBreakdown(p.items, p.name))}</div>
+        ${(() => { const h = codeChipsHTML(codeBreakdown(p.items, p.name)); return h ? `<div style="margin-top:3px;">${h}</div>` : ''; })()}
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;">${Object.entries(p.types).sort((a,b)=>b[1]-a[1]).map(([t,n]) => `<span style="font-size:11.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:1px 8px;">${esc(t)} <b>${n}</b></span>`).join("")}</div></div>
       <div style="font-size:18px;font-weight:800;">${p.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;">상세 ›</span>
@@ -2263,6 +2264,7 @@ function renderClaim(data){
     ${reviewHTML}
     ${spikeHTML}
     ${repeatHTML}
+    ${wdHTML}
     ${areaHTML}
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.supplier.color};"><h2>📦 클레임 상품 TOP 10<span class="tag">공급사 클레임 · 상품별 유형 건수${pmNote} · 누르면 채널톡 링크</span></h2>${prodHTML}</div>
     <div class="footer-note">
@@ -2270,6 +2272,7 @@ function renderClaim(data){
       유형은 tags 3depth를 단순화했습니다(품질불량의 환불·퀵 등 처리방안, "(배송기사)"·"(보냉불량)" 꼬리표 제외 · 분리/익일배송→미배송, 정정배송→오배송). 한 상담에 여러 유형이 있으면 유형별로 각각 셉니다.<br>
       상품은 상담 설명의 HERO 코드를 상품 매칭 시트(히어로코드·유통사명·상품명)와 매칭하고, 같은 상품명·같은 공급사는 하나로 묶습니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
     </div>`;
+  drawWeekdayChart();
 }
 
 /* ---- 상품코드 세부: 같은 상품명이라도 히어로코드가 다를 수 있어 코드별 건수를 함께 표시 ---- */
@@ -2279,12 +2282,12 @@ function codeBreakdown(items, name){
   return Object.entries(m).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]));
 }
 function codeChipsHTML(list, max){
-  if (!list.length) return "";
-  max = max || 4;
+  if (list.length < 2) return ""; // 코드가 1종이면 카드에선 생략(상세 팝업에서 확인) — 같은 상품명에 코드가 여러 개일 때만 표시
+  max = max || 3;
   const multi = list.length > 1;
-  return `<span style="display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;vertical-align:middle;">${multi ? `<span style="font-size:10.5px;font-weight:700;color:#F0555B;">코드 ${list.length}종</span>` : ''}${list.slice(0, max).map(([c,n]) => `<span style="font-family:ui-monospace,Menlo,monospace;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:0 6px;color:var(--ink-dim);">${esc(c)}${multi ? ` <b style="color:var(--ink);">${n}</b>` : ''}</span>`).join("")}${list.length > max ? `<span style="font-size:11px;color:var(--ink-dim);">외 ${list.length - max}</span>` : ''}</span>`;
+  return `<span style="font-size:11.5px;color:var(--ink-dim);">상품코드 ${list.slice(0, max).map(([c,n]) => multi ? `${esc(c)} <b style="color:var(--ink);">${n}건</b>` : esc(c)).join(" · ")}${list.length > max ? ` 외 ${list.length - max}종` : ''}</span>`;
 }
-function codeText(list, max){ max = max || 3; return list.length ? list.slice(0, max).map(([c,n]) => list.length > 1 ? `${c} ${n}건` : c).join(", ") + (list.length > max ? ` 외 ${list.length-max}` : "") : ""; }
+function codeText(list, max){ max = max || 3; return list.length > 1 ? list.slice(0, max).map(([c,n]) => list.length > 1 ? `${c} ${n}건` : c).join(", ") + (list.length > max ? ` 외 ${list.length-max}` : "") : ""; }
 function spikeProdName(s){ return s.level === "P" ? s.key.split("|").slice(2).join("|") : null; }
 
 /* ---- 클레임 급증 인사이트: "어느 날, 어느 공급사(센터)에서, 어떤 클레임이 평소보다 갑자기 늘었나" ---- */
@@ -2345,7 +2348,7 @@ function spikeSentence(s, multiDay){
   const types = (tl.length === 1 && s.label.endsWith(tl[0][0])) ? "" : tl.map(([t,n]) => `${t} ${n}`).join(" · "); // 라벨에 이미 유형이 있으면 생략
   const rb = Math.max(1, Math.round(s.base)); // 표시는 정수(반올림), 배수도 반올림한 평소 건수 기준
   const base = s.base ? `평소 ${rb}건 → ${s.now}건 (${Math.round(s.now/rb)}배)` : `평소 0건 → ${s.now}건 (신규)`;
-  const when = multiDay && s.peak ? ` · <b>${dateLabel(s.peak[0])}</b>에 ${s.peak[1]}건 집중` : "";
+  const when = ""; // 피크일 표기(○일에 N건 집중)는 해석이 어려워 제외
   return { types, base, when };
 }
 const SPIKE_PER_TEAM = 5;
@@ -2361,7 +2364,7 @@ function buildSpikeCardHTML(spikes, title, multiDay, prevLabel){
     const list = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
     const rows = list.map(s => { const i = spikes.indexOf(s), x = spikeSentence(s, multiDay);
       return `<div onclick="openClaimModal('spike',${i})" style="display:flex;gap:10px;align-items:flex-start;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
-        <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;"><b style="color:var(--ink);">${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(x.types)}</span>${s.level === "P" ? `<div style="margin:2px 0;">${codeChipsHTML(codeBreakdown(s.items, spikeProdName(s)))}</div>` : '<br>'}
+        <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;"><b style="color:var(--ink);">${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(x.types)}</span>${(() => { const h = s.level === "P" ? codeChipsHTML(codeBreakdown(s.items, spikeProdName(s))) : ""; return h ? `<div style="margin:2px 0;">${h}</div>` : '<br>'; })()}
           <span style="color:var(--bad);font-weight:700;">▲ ${x.base}</span><span style="color:var(--ink-dim);">${x.when}</span></div>
         <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
     return teamSectionHead(t, list.length, "건 급증") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">평소 수준입니다.</div>`);
@@ -2370,6 +2373,49 @@ function buildSpikeCardHTML(spikes, title, multiDay, prevLabel){
     <h2>⚡ 클레임 급증 인사이트<span class="tag">${title} · ${prevLabel} 평균 대비 2배↑ & 3건↑ · 섹션별 최대 ${SPIKE_PER_TEAM}건</span></h2>
     <div style="margin-top:4px;">${sections}</div>
   </div>`;
+}
+
+/* ---- 요일별 클레임 패턴: "무슨 요일에 클레임이 많은가" (일요일 제외, 요일별 하루 평균) ---- */
+const WD_LABEL = ["일","월","화","수","목","금","토"], WD_DAYS = [1,2,3,4,5,6];
+function buildWeekdayClaimCard(allItems, allDates, endMd, monthDates, monthLabel){
+  let win;
+  if (monthDates) win = monthDates.slice();
+  else { const end = new Date(mdToISO(endMd)).getTime(); win = allDates.filter(d => { const t = new Date(mdToISO(d)).getTime(); return t <= end && t > end - 28 * 864e5; }); }
+  win = win.filter(d => weekdayOf(d) !== 0);
+  const set = new Set(win), nDays = [0,0,0,0,0,0,0];
+  win.forEach(d => nDays[weekdayOf(d)]++);
+  const cnt = CLAIM_TEAMS.map(() => [0,0,0,0,0,0,0]), tot = [0,0,0,0,0,0,0];
+  allItems.forEach(it => { if (!set.has(it.r.date)) return; const w = weekdayOf(it.r.date); tot[w]++;
+    CLAIM_TEAMS.forEach((t, k) => { if (it.claims.some(c => t.areas.includes(c.area))) cnt[k][w]++; }); });
+  const avgOf = row => WD_DAYS.map(w => nDays[w] ? row[w] / nDays[w] : 0);
+  const totAvg = avgOf(tot), teamAvg = cnt.map(avgOf);
+  const valid = WD_DAYS.map((w, i) => nDays[w] ? i : -1).filter(i => i >= 0);
+  window.__wdData = { teamAvg, totAvg };
+  if (!valid.length) return "";
+  const overall = valid.reduce((a, i) => a + totAvg[i], 0) / valid.length;
+  const pk = valid.reduce((a, i) => totAvg[i] > totAvg[a] ? i : a, valid[0]);
+  const pct = overall ? Math.round((totAvg[pk] / overall - 1) * 100) : 0;
+  const teamPeak = CLAIM_TEAMS.map((t, k) => { const a = teamAvg[k]; const i = valid.reduce((x, j) => a[j] > a[x] ? j : x, valid[0]); return a[i] ? `<span style="white-space:nowrap;"><span style="color:${t.color};font-weight:700;">${t.icon} ${t.name}</span> ${WD_LABEL[WD_DAYS[i]]}요일 (하루 ${Math.round(a[i])}건)</span>` : ""; }).filter(Boolean);
+  const range = monthDates ? monthLabel : `${dateLabel(win[0])} ~ ${dateLabel(win[win.length-1])}`;
+  return `<div class="card" style="margin-bottom:16px;">
+    <h2>📅 요일별 클레임<span class="tag">${range} · 요일별 하루 평균 건수 (일요일 제외)</span></h2>
+    <div style="font-size:14px;margin-bottom:6px;"><b style="color:var(--bad);">${WD_LABEL[WD_DAYS[pk]]}요일</b>에 클레임이 가장 많습니다 — 하루 평균 <b>${Math.round(totAvg[pk])}건</b>${pct > 0 ? ` (요일 평균보다 <b style="color:var(--bad);">${pct}%</b> 많음)` : ''}</div>
+    <div style="font-size:12.5px;color:var(--ink-dim);display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:10px;">가장 많은 요일 · ${teamPeak.join("")}</div>
+    <div style="position:relative;height:230px;"><canvas id="claimWdChart"></canvas></div>
+  </div>`;
+}
+function drawWeekdayChart(){
+  const el = document.getElementById("claimWdChart"), d = window.__wdData; if (!el || !d) return;
+  Chart.defaults.color = "#8B96AD"; Chart.defaults.borderColor = "#28324D";
+  const r1 = v => Math.round(v * 10) / 10;
+  const line = (label, data, color, extra) => ({ type:"line", label, data: data.map(r1), borderColor: color, backgroundColor: color, borderWidth: 2.5, tension: .3, pointRadius: 4, pointHoverRadius: 6, ...extra });
+  charts.claimWd = new Chart(el, {
+    data:{ labels: WD_DAYS.map(w => WD_LABEL[w] + "요일"), datasets: [
+      line("전체", d.totAvg, "#F0555B", { borderWidth: 3, borderDash: [6, 4], pointRadius: 5 }),
+      ...CLAIM_TEAMS.map((t, k) => line(`${t.icon} ${t.name}`, d.teamAvg[k], t.color)) ] },
+    options:{ maintainAspectRatio:false, animation:false, interaction:{ mode:"index", intersect:false },
+      plugins:{ legend:{ position:"bottom", labels:{ boxWidth:8, boxHeight:8, usePointStyle:true } }, tooltip:{ callbacks:{ label: c => `${c.dataset.label} 하루 ${Math.round(c.raw)}건` } } },
+      scales:{ x:{ offset:true, grid:{ display:false } }, y:{ beginAtZero:true, grid:{ color:"#28324D" }, ticks:{ precision:0 } } } } });
 }
 
 /* ---- 반복 클레임 업장 (CS 관점): 같은 업장이 같은 상품 / 같은 배송 유형으로 계속 클레임하는가 ---- */
@@ -2414,7 +2460,7 @@ function buildRepeatStoreCardHTML(rep, endMd){
       return `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
         <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
         <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
-          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatWhat(x, g))}</b>${g === "product" ? `<div style="margin:2px 0;">${codeChipsHTML(codeBreakdown(x.items, x.name))}</div>` : '<br>'}
+          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatWhat(x, g))}</b>${(() => { const h = g === "product" ? codeChipsHTML(codeBreakdown(x.items, x.name)) : ""; return h ? `<div style="margin:2px 0;">${h}</div>` : '<br>'; })()}
           <span style="font-size:12px;color:var(--ink-dim);">${esc(d.text)} · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${d.share}%</b></span></div>
         <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
         <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
