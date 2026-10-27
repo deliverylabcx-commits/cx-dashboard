@@ -2085,6 +2085,7 @@ function openClaimModal(kind, key){
   if (kind === "type"){ const [area, type] = key.split("|"); items = ctx.cur[area].types[type] || []; title = `${CLAIM_AREA_MAP[area].icon} ${type}`; color = CLAIM_AREA_MAP[area].color; }
   else if (kind === "repeat"){ const [g, ix] = String(key).split(":"); const rp = ((window.__claimRepeat||{})[g]||[])[+ix]; if (!rp) return; items = rp.items;
     if (g === "product"){ title = `🔁 ${rp.store} · ${rp.name}`; color = CLAIM_AREA_MAP.supplier.color; kind = "product"; } else { title = `🔁 ${rp.store} · ${rp.type}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; } }
+  else if (kind === "cell"){ const c = (window.__claimCell||[])[key]; if (!c) return; items = c.items; title = `🚚 ${c.title}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; }
   else if (kind === "spike"){ const sp = (window.__claimSpikes||[])[key]; if (!sp) return; items = sp.items; title = `⚡ ${sp.label}`; color = "#F0555B"; kind = "type"; key = sp.area + "|"; }
   else { const pg = (window.__claimProd||[])[key]; if (!pg) return; items = pg.items; title = `📦 ${pg.name} · ${pg.sup}`; color = CLAIM_AREA_MAP.supplier.color; }
   items = items.slice().sort((a,b) => (vipMdKey(b.r.date)*100 + b.r.hour) - (vipMdKey(a.r.date)*100 + a.r.hour));
@@ -2197,7 +2198,7 @@ function renderClaim(data){
   const spikeList = detectClaimSpikes(allItems, buckets), spikePrev = claimPeriod==='daily' ? "직전 4영업일" : claimPeriod==='weekly' ? "직전 4주" : "직전 월";
   const spikeHTML = buildSpikeCardHTML(spikeList, title, claimPeriod !== "daily", spikePrev);
   const repeatEnd = buckets[buckets.length-1].dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b)).pop();
-  const repeatData = detectRepeatStores(allItems, repeatEnd);
+  const repeatData = detectRepeatStores(allItems, repeatEnd, claimPeriod === "daily");
   const repeatHTML = buildRepeatStoreCardHTML(repeatData, repeatEnd);
   const wdHTML = buildWeekdayClaimCard(allItems, allDates, repeatEnd, claimPeriod === "monthly" ? buckets[buckets.length-1].dates : null, title);
   const reviewHTML = buildClaimReviewBarHTML(spikeList, repeatData, { title, prevLabel: spikePrev, endMd: repeatEnd, multiDay: claimPeriod !== "daily" });
@@ -2256,6 +2257,29 @@ function renderClaim(data){
       <div style="font-size:18px;font-weight:800;">${p.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;">상세 ›</span>
     </div>`).join("") : `<div style="color:var(--ink-dim);font-size:13px;">상품코드가 기재된 공급사 클레임이 없습니다.</div>`;
+  // 4) 배송 클레임: 센터 TOP 10 × 유형 (어느 센터에서 어떤 이슈가 많았나)
+  const delivItems = items.filter(it => it.claims.some(c => c.area === "delivery"));
+  const cenMap = {}, typeTot = {};
+  delivItems.forEach(it => { const cen = it.r.center || "센터 미기재"; const m = cenMap[cen] = cenMap[cen] || { n:0, types:{} }; m.n++;
+    [...new Set(it.claims.filter(c => c.area === "delivery").map(c => c.type))].forEach(t => { (m.types[t] = m.types[t] || []).push(it); typeTot[t] = (typeTot[t]||0) + 1; }); });
+  const cenTop = Object.entries(cenMap).sort((a,b) => b[1].n - a[1].n).slice(0, 10);
+  const dTypes = Object.entries(typeTot).sort((a,b) => b[1]-a[1]).map(([t]) => t).slice(0, 6);
+  const cellMax = Math.max(1, ...cenTop.flatMap(([,m]) => dTypes.map(t => m.types[t]?.length || 0)));
+  window.__claimCell = [];
+  const dColor = CLAIM_AREA_MAP.delivery.color;
+  let topPair = null;
+  cenTop.forEach(([cen, m]) => dTypes.forEach(t => { const n = m.types[t]?.length || 0; if (!topPair || n > topPair.n) topPair = { cen, t, n }; }));
+  const delivHTML = cenTop.length ? `
+    ${topPair && topPair.n ? `<div style="font-size:13.5px;margin-bottom:10px;">가장 많은 조합은 <b style="color:${dColor};">${esc(topPair.cen)} · ${esc(topPair.t)}</b> <b>${topPair.n}건</b>입니다.</div>` : ''}
+    <div style="overflow-x:auto;"><table style="font-size:13px;">
+      <thead><tr><th style="text-align:left;">#</th><th style="text-align:left;">센터</th>${dTypes.map(t => `<th>${esc(t)}</th>`).join("")}<th>합계</th></tr></thead>
+      <tbody>${cenTop.map(([cen, m], i) => { const rowMax = Math.max(...dTypes.map(t => m.types[t]?.length || 0));
+        return `<tr><td style="text-align:left;color:${i<3?dColor:'var(--ink-dim)'};font-weight:700;">${i+1}</td><td style="text-align:left;white-space:nowrap;font-weight:600;">${esc(cen)}</td>
+        ${dTypes.map(t => { const list = m.types[t] || [], n = list.length; if (!n) return `<td style="color:var(--ink-dim);">-</td>`;
+          const idx = window.__claimCell.push({ title:`${cen} · ${t}`, items:list }) - 1;
+          return `<td onclick="openClaimModal('cell',${idx})" style="cursor:pointer;background:${dColor}${Math.round(18 + 60 * n / cellMax).toString(16).padStart(2,'0')};${n === rowMax ? 'font-weight:800;color:var(--ink);' : ''}">${n}</td>`; }).join("")}
+        <td style="font-weight:800;">${m.n}</td></tr>`; }).join("")}</tbody>
+    </table></div>` : `<div style="color:var(--ink-dim);font-size:13px;">해당 기간 배송 클레임이 없습니다.</div>`;
   const pmNote = productMaster ? ` · 상품정보: ${productMasterSource}` : productMasterError ? " · 상품정보를 불러오지 못해 코드로 표시" : " · 상품명 매칭 중…";
 
   app.innerHTML = nav(picker) + `
@@ -2267,12 +2291,40 @@ function renderClaim(data){
     ${wdHTML}
     ${areaHTML}
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.supplier.color};"><h2>📦 클레임 상품 TOP 10<span class="tag">공급사 클레임 · 상품별 유형 건수${pmNote} · 누르면 채널톡 링크</span></h2>${prodHTML}</div>
+    <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.delivery.color};"><h2>🚚 배송 클레임 · 센터 TOP 10<span class="tag">센터별 이슈 유형 건수 · 숫자를 누르면 채널톡 링크</span></h2>${delivHTML}</div>
     <div class="footer-note">
       분류: CX Play Book 「채널톡_태그관리」 기준 — 공급사 클레임(공급사클레임·품질불량), 배송 클레임(배송클레임·FC배송), 서비스 클레임(서비스이용클레임), 기타(유관부서 전달).<br>
       유형은 tags 3depth를 단순화했습니다(품질불량의 환불·퀵 등 처리방안, "(배송기사)"·"(보냉불량)" 꼬리표 제외 · 분리/익일배송→미배송, 정정배송→오배송). 한 상담에 여러 유형이 있으면 유형별로 각각 셉니다.<br>
       상품은 상담 설명의 HERO 코드를 상품 매칭 시트(히어로코드·유통사명·상품명)와 매칭하고, 같은 상품명·같은 공급사는 하나로 묶습니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
     </div>`;
   drawWeekdayChart();
+}
+
+/* ---- 문의·클레임 유형 (메인 대시보드): 클레임 VOC와 같은 채널톡 RAW 태그 기준 ----
+   클레임 3종은 클레임 VOC 분류(CLAIM_TEAMS)와 동일, 문의 3종은 태그 2depth(배송문의·서비스이용문의·주문결제) 기준. 상담 1건은 유형별로 1번만 셈 */
+const ISSUE_GROUPS = [
+  { name:"상품 클레임",       team:"product",  color:"#E8A33D" },
+  { name:"배송 클레임",       team:"delivery", color:"#4C6EF5" },
+  { name:"서비스·기타 클레임", team:"other",    color:"#BE4BDB" },
+  { name:"배송 문의",         tag:"배송문의",     color:"#748FFC", inq:true },
+  { name:"서비스 이용 문의",   tag:"서비스이용문의", color:"#20C997", inq:true },
+  { name:"주문·결제 문의",     tag:["주문결제","오주문단순변심"], color:"#8B96AD", inq:true },
+];
+const ISSUE_COLOR = Object.fromEntries(ISSUE_GROUPS.map(g => [g.name, g.color]));
+let __issueCache = { src:null, len:0, sec:null };
+function rawIssueSection(rawLog){
+  if (!rawLog || !rawLog.length) return null;
+  if (__issueCache.src === rawLog && __issueCache.len === rawLog.length) return __issueCache.sec;
+  const sec = {}; ISSUE_GROUPS.forEach(g => sec[g.name] = {});
+  rawLog.forEach(r => {
+    const add = g => sec[g.name][r.date] = (sec[g.name][r.date] || 0) + 1;
+    const it = parseClaimRow(r);
+    if (it) ISSUE_GROUPS.filter(g => g.team).forEach(g => { const t = CLAIM_TEAMS.find(x => x.key === g.team); if (it.claims.some(c => t.areas.includes(c.area))) add(g); });
+    const t2 = new Set((r.tags || "").split(",").map(t => (t.trim().split("/")[1] || "")));
+    ISSUE_GROUPS.filter(g => g.tag).forEach(g => { if ([].concat(g.tag).some(t => t2.has(t))) add(g); });
+  });
+  __issueCache = { src: rawLog, len: rawLog.length, sec };
+  return sec;
 }
 
 /* ---- 상품코드 세부: 같은 상품명이라도 히어로코드가 다를 수 있어 코드별 건수를 함께 표시 ---- */
@@ -2421,7 +2473,7 @@ function drawWeekdayChart(){
 /* ---- 반복 클레임 업장 (CS 관점): 같은 업장이 같은 상품 / 같은 배송 유형으로 계속 클레임하는가 ---- */
 // 기준: 기준일 포함 최근 30일 · 같은 업장 + (같은 상품 | 같은 배송 유형) 3건 이상 · 서로 다른 2일 이상 발생
 const REPEAT_DAYS = 30, REPEAT_MIN = 3, REPEAT_MIN_DAYS = 2, REPEAT_PER_TEAM = 5;
-function detectRepeatStores(allItems, endMd){
+function detectRepeatStores(allItems, endMd, daily){
   const empty = { product:[], delivery:[] };
   if (!endMd) return empty;
   const end = new Date(mdToISO(endMd)).getTime(), DAY = 864e5;
@@ -2439,35 +2491,38 @@ function detectRepeatStores(allItems, endMd){
     }
     it.claims.filter(c => c.area === "delivery").forEach(c => grp(gd, `${store}|${c.type}`, { store, type:c.type }, it));
   });
-  const fin = g => Object.values(g).filter(x => x.items.length >= REPEAT_MIN && x.days.size >= REPEAT_MIN_DAYS)
+  // 주간·월간: 최근 30일 3건↑·2일↑ / 일간: 오늘 접수 건 중 최근 30일 안에 같은 클레임 이력(다른 날)이 있는 경우
+  const fin = g => Object.values(g).filter(x => daily ? (x.days.has(endMd) && x.days.size >= 2) : (x.items.length >= REPEAT_MIN && x.days.size >= REPEAT_MIN_DAYS))
     .map(x => { const days = [...x.days].sort((a,b)=>vipMdKey(a)-vipMdKey(b)); const cen = Object.entries(x.centers).sort((a,b)=>b[1]-a[1])[0];
-      return { ...x, n:x.items.length, dayList:days, last:days[days.length-1], center: cen ? cen[0] : "", storeTotal:storeTotal[x.store].size }; })
+      const prev = days.filter(d => d !== endMd);
+      return { ...x, n:x.items.length, dayList:days, last:days[days.length-1], center: cen ? cen[0] : "", storeTotal:storeTotal[x.store].size, todayN: x.items.filter(i => i.r.date === endMd).length, prevLast: prev[prev.length-1] }; })
     .sort((a,b) => b.n - a.n || vipMdKey(b.last) - vipMdKey(a.last));
-  return { product: fin(gp), delivery: fin(gd) };
+  return { product: fin(gp), delivery: fin(gd), daily: !!daily, endMd };
 }
 function repeatDays(x){ return x.dayList.slice(-4).map(d => dateLabel(d)).join(", ") + (x.dayList.length > 4 ? " 외" : ""); }
 function repeatWhat(x, g){ return g === "product" ? `${x.name} · ${x.sup}` : x.type; }
-function repeatDetail(x, g){
+function repeatDetail(x, g, daily){
   const share = x.storeTotal ? Math.round(x.n / x.storeTotal * 100) : 0;
   const types = g === "product" ? Object.entries(x.types).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([t,n]) => `${t} ${n}`).join(" · ") + " · " : (x.center ? `${x.center} · ` : "");
+  if (daily) return { share, text: `${types}오늘 ${x.todayN}건 · 이전 ${x.n - x.todayN}건 (최근 ${dateLabel(x.prevLast)})` };
   return { share, text: `${types}${x.dayList.length}일에 걸쳐 (${repeatDays(x)})` };
 }
 function buildRepeatStoreCardHTML(rep, endMd){
   window.__claimRepeat = rep;
   const sec = (t, g) => {
     const list = rep[g].slice(0, REPEAT_PER_TEAM);
-    const rows = list.map((x, i) => { const d = repeatDetail(x, g);
+    const rows = list.map((x, i) => { const d = repeatDetail(x, g, rep.daily);
       return `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
         <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
         <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
           <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatWhat(x, g))}</b>${(() => { const h = g === "product" ? codeChipsHTML(codeBreakdown(x.items, x.name)) : ""; return h ? `<div style="margin:2px 0;">${h}</div>` : '<br>'; })()}
-          <span style="font-size:12px;color:var(--ink-dim);">${esc(d.text)} · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${d.share}%</b></span></div>
+          <span style="font-size:12px;color:var(--ink-dim);">${esc(d.text)}${rep.daily ? '' : ` · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${d.share}%</b>`}</span></div>
         <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
         <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
-    return teamSectionHead(t, rep[g].length, "곳") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">반복 클레임 업장이 없습니다.</div>`);
+    return teamSectionHead(t, rep[g].length, "곳") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">${rep.daily ? '오늘 접수 건 중 이전에 같은 클레임이 있었던 업장이 없습니다.' : '반복 클레임 업장이 없습니다.'}</div>`);
   };
   return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F76707;">
-    <h2>🔁 반복 클레임 업장<span class="tag">${dateLabel(endMd)} 기준 최근 ${REPEAT_DAYS}일 · 같은 업장이 같은 상품(배송 유형)으로 ${REPEAT_MIN}건↑, ${REPEAT_MIN_DAYS}일 이상</span></h2>
+    <h2>🔁 반복 클레임 업장<span class="tag">${rep.daily ? `${dateLabel(endMd)} 접수 건 중 최근 ${REPEAT_DAYS}일 안에 같은 업장·같은 상품(배송 유형) 클레임이 있었던 곳` : `${dateLabel(endMd)} 기준 최근 ${REPEAT_DAYS}일 · 같은 업장이 같은 상품(배송 유형)으로 ${REPEAT_MIN}건↑, ${REPEAT_MIN_DAYS}일 이상`}</span></h2>
     <div style="margin-top:4px;">${sec(CLAIM_TEAMS[0], "product")}${sec(CLAIM_TEAMS[1], "delivery")}</div>
     <div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">상품: 상품 문제인지 업장의 보관·기대 수준 차이인지 확인 · 배송: 해당 업장 주소·출입·배송 동선 점검. 누르면 채널톡 링크가 열립니다.</div>
   </div>`;
@@ -2478,7 +2533,7 @@ function buildClaimReviewText(spikes, rep, ctx, teamKey){
   const strip = s => String(s||"").replace(/<[^>]+>/g, "");
   const line = "━━━━━━━━━━━━━━━━━━";
   let out = `*[클레임 VOC 이슈 리뷰] ${ctx.title}*\n`;
-  out += `_급증: ${ctx.prevLabel} 평균 대비 2배↑·3건↑ / 반복 업장: ${dateLabel(ctx.endMd)} 기준 최근 ${REPEAT_DAYS}일 ${REPEAT_MIN}건↑_\n`;
+  out += `_급증: ${ctx.prevLabel} 평균 대비 2배↑·3건↑ / 반복 업장: ${rep.daily ? `오늘 접수 건 중 최근 ${REPEAT_DAYS}일 내 같은 클레임 이력` : `${dateLabel(ctx.endMd)} 기준 최근 ${REPEAT_DAYS}일 ${REPEAT_MIN}건↑`}_\n`;
   CLAIM_TEAMS.filter(t => !teamKey || t.key === teamKey).forEach(t => {
     const sp = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
     out += `${line}\n${t.icon} *${t.name}* ${t.mention}\n`;
@@ -2487,7 +2542,7 @@ function buildClaimReviewText(spikes, rep, ctx, teamKey){
     if (rep[t.key]){
       const rp = rep[t.key].slice(0, REPEAT_PER_TEAM);
       out += `🔁 반복 업장: ${rep[t.key].length ? rep[t.key].length + "곳" : "없음"}\n`;
-      rp.forEach((x, i) => { const d = repeatDetail(x, t.key); const ct = t.key === "product" ? codeText(codeBreakdown(x.items, x.name)) : ""; out += `   ${i+1}) ${x.store} → ${repeatWhat(x, t.key)}${ct ? ` [${ct}]` : ""} ${x.n}건 · ${d.text}\n`; });
+      rp.forEach((x, i) => { const d = repeatDetail(x, t.key, rep.daily); const ct = t.key === "product" ? codeText(codeBreakdown(x.items, x.name)) : ""; out += `   ${i+1}) ${x.store} → ${repeatWhat(x, t.key)}${ct ? ` [${ct}]` : ""} ${x.n}건 · ${d.text}\n`; });
     }
   });
   return out.trim();
@@ -3071,7 +3126,7 @@ function renderCore(data){
   });
 
   // 카테고리별 이슈 (배송문의/배송클레임/서비스이용문의 등) 랭킹 + WoW + 주별 트렌드
-  const issueSection = sections["카테고리별 이슈"] || {};
+  const issueSection = rawIssueSection(rawLog) || sections["카테고리별 이슈"] || {}; // 클레임 VOC와 같은 RAW 기준
   const issueCategories = Object.keys(issueSection);
   const issueTodayClamped = {}; // 중복 카운트 방지를 위해 카테고리별로 한 번만 클램프
   issueCategories.forEach(c => { issueTodayClamped[c] = clampNeg(issueSection[c][today] || 0); });
@@ -3418,36 +3473,6 @@ function renderCore(data){
       </div>
     </div>
 
-    <div class="grid1">
-      <div class="card">
-        <h2>SKU 배송물량 · 인입량 상관도 <span class="tag">요일별 · 최근 4주 평균</span></h2>
-        <div class="kpis" style="margin-bottom:16px;">
-          <div class="kpi"><div class="label">${dateLabel(today)} 배송물량(SKU)</div><div class="val">${fmtNum(skuToday)}</div>
-            <div class="delta ${skuWowDelta==null?'':(skuWowDelta>=0?'up':'down')}">${skuWowDelta!=null ? (skuWowDelta>=0?'▲ ':'▼ ')+Math.abs(Math.round(skuWowDelta*100))+'% (전주 동요일 대비)' : '전주 데이터 없음'}</div>
-            ${skuWow!=null?`<div class="delta" style="font-size:10.5px;">전주 ${fmtNum(skuWow)} → 금주 ${fmtNum(skuToday)}</div>`:''}</div>
-          <div class="kpi"><div class="label">물량-인입 상관도 (전체)</div><div class="val" style="font-size:18px;">${skuCorrAll.r!=null?skuCorrAll.r.toFixed(2):'-'}</div>
-            <div class="delta">${corrLabel(skuCorrAll.r)} · 표본 ${skuCorrAll.n}일</div></div>
-        </div>
-        <table>
-          <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 CS처리량</th><th>물량-인입 상관도</th></tr></thead>
-          <tbody>
-            ${[1,2,3,4,5,6].map(wd => {
-              const isToday = wd === todayWd;
-              const c = skuCorrByWeekday[wd];
-              return `<tr style="${isToday?'background:var(--panel-2);':''}">
-                <td style="text-align:left;${isToday?'font-weight:700;color:var(--accent);':''}">${WEEKDAY_KO[wd]}${isToday?' (오늘)':''}</td>
-                <td>${fmtNum(skuWeekdayAvg[wd])}</td>
-                <td>${weekdayTargetLabel(weekdayTargets[wd])}</td>
-                <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.6;">
-          상관계수(r)는 −1~+1 사이 값으로, +1에 가까울수록 "배송물량이 많은 날 상담인입도 많다"는 관계가 강함을 뜻합니다. 상관관계는 인과관계가 아니며, 표본이 적은 요일은 참고용으로만 보시길 권합니다.
-        </div>
-      </div>
-    </div>
 
 
     <div class="grid2">
@@ -3500,19 +3525,18 @@ function renderCore(data){
 
     <div class="grid1">
       <div class="card">
-        <h2>카테고리별 이슈 <span class="tag">TOP 티어 · ${dateLabel(today)}</span></h2>
+        <h2>문의·클레임 유형별 현황 <span class="tag">${dateLabel(today)} · 채널톡 태그 기준 · 클레임은 클레임 VOC와 같은 분류</span></h2>
         <div class="kpis" style="margin-bottom:16px;">
-          ${issueTodayRanking.map(x => {
-            return `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.val)}</div></div>`;
+          ${issueTodayRanking.map(x => { const w = issueWow.find(y => y.category === x.category);
+            return `<div class="kpi" style="border-left:3px solid ${ISSUE_COLOR[x.category]||'var(--line)'};"><div class="label">${x.category}</div><div class="val">${fmtNum(x.val)}</div><div style="margin-top:4px;">${deltaBadge(x.val, w ? w.wow : null)} <span style="font-size:10.5px;color:var(--ink-dim);">전주 동요일 ${w && w.wow != null ? fmtNum(w.wow) : '-'}</span></div></div>`;
           }).join("") || '<div style="color:var(--ink-dim);font-size:13px;">카테고리별 이슈 데이터 없음</div>'}
         </div>
-        <canvas id="chartIssueRank"></canvas>
       </div>
     </div>
 
     <div class="grid1">
       <div class="card">
-        <h2>카테고리별 이슈 주별 트렌드 <span class="tag">주간 랭킹 추이</span></h2>
+        <h2>문의·클레임 주별 추이 <span class="tag">주별 건수 · 최근 8주 · 실선=클레임, 점선=문의 · 마지막 주는 진행 중</span></h2>
         <canvas id="chartIssueWeekly"></canvas>
       </div>
     </div>
@@ -3752,7 +3776,7 @@ function renderWeekly(data){
   const delayWeekPrev = delayWeekStats(prevWeek);
 
   // 카테고리별 이슈 주간 집계
-  const issueSection = sections["카테고리별 이슈"] || {};
+  const issueSection = rawIssueSection(rawLog) || sections["카테고리별 이슈"] || {}; // 클레임 VOC와 같은 RAW 기준
   const issueCategories = Object.keys(issueSection);
   function issueWeekStats(w){
     if (!w) return [];
@@ -3983,7 +4007,7 @@ function renderWeekly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>카테고리별 이슈 (주간)</h2>
+      <h2>문의·클레임 유형별 (주간) <span class="tag">채널톡 태그 기준 · 클레임은 클레임 VOC와 같은 분류</span></h2>
       <div class="kpis">
         ${issueWeek.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
           <div class="delta" style="font-size:11px;">${wowText(x.total, issueWeekPrevMap[x.category])}</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">카테고리별 이슈 데이터 없음</div>'}
@@ -3992,22 +4016,15 @@ function renderWeekly(data){
 
     <div class="card" style="margin-bottom:16px;">
     <div class="card" style="margin-bottom:16px;">
-      <h2>SKU 배송물량 & 요일별 목표 CS처리량 (주간)</h2>
-      <div class="kpis" style="margin-bottom:16px;">
-        <div class="kpi"><div class="label">주간 배송물량 합계</div><div class="val">${fmtNum(skuWeekTotal)}</div>
-          <div class="delta">${wowText(skuWeekTotal, skuWeekPrevTotal)}</div></div>
-        <div class="kpi"><div class="label">물량-인입 상관도</div><div class="val" style="font-size:18px;">${skuCorrWeek.r!=null?skuCorrWeek.r.toFixed(2):'-'}</div>
-          <div class="delta">${corrLabel(skuCorrWeek.r)} · 표본 ${skuCorrWeek.n}일</div></div>
-      </div>
+      <h2>요일별 목표 CS처리량 (주간)</h2>
       <table>
-        <thead><tr><th>요일</th><th>날짜</th><th>배송물량(SKU)</th><th>목표 CS처리량(인당)</th><th>실제 인입</th></tr></thead>
+        <thead><tr><th>요일</th><th>날짜</th><th>목표 CS처리량(인당)</th><th>실제 인입</th></tr></thead>
         <tbody>
           ${week.dates.map(d => {
             const wd = weekdayOf(d);
             return `<tr>
               <td style="text-align:left;">${WEEKDAY_KO[wd]}</td>
               <td>${d}</td>
-              <td>${fmtNum(skuRow?.[d])}</td>
               <td>${weekdayTargetLabel(weekdayTargetsW[wd])}</td>
               <td>${fmtNum(inboundOfDateW(d))}</td>
             </tr>`;
@@ -4271,7 +4288,7 @@ function renderMonthly(data){
   const delayMonth = delayStats(month.dates);
   const delayMonthPrev = delayStats(prevMonth?.dates);
 
-  const issueSection = sections["카테고리별 이슈"] || {};
+  const issueSection = rawIssueSection(rawLog) || sections["카테고리별 이슈"] || {}; // 클레임 VOC와 같은 RAW 기준
   const issueCategories = Object.keys(issueSection);
   function issueStats(dSet){
     if (!dSet) return [];
@@ -4649,7 +4666,7 @@ function renderMonthly(data){
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h2>카테고리별 이슈 (월간)</h2>
+      <h2>문의·클레임 유형별 (월간) <span class="tag">채널톡 태그 기준 · 클레임은 클레임 VOC와 같은 분류</span></h2>
       <div class="kpis">
         ${issueMonth.map(x => `<div class="kpi"><div class="label">${x.category}</div><div class="val">${fmtNum(x.total)}</div>
           <div class="delta" style="font-size:11px;">${wowText(x.total, issueMonthPrevMap[x.category])}</div></div>`).join("") || '<div style="color:var(--ink-dim);font-size:13px;">데이터 없음</div>'}
@@ -4658,28 +4675,19 @@ function renderMonthly(data){
 
     <div class="card" style="margin-bottom:16px;">
     <div class="card" style="margin-bottom:16px;">
-      <h2>SKU 배송물량 & 요일별 목표 CS처리량 (월간)</h2>
-      <div class="kpis" style="margin-bottom:16px;">
-        <div class="kpi"><div class="label">월간 배송물량 합계</div><div class="val">${fmtNum(skuMonthTotal)}</div>
-          <div class="delta">${wowText(skuMonthTotal, skuMonthPrevTotal)}</div></div>
-        <div class="kpi"><div class="label">물량-인입 상관도</div><div class="val" style="font-size:18px;">${skuCorrMonth.r!=null?skuCorrMonth.r.toFixed(2):'-'}</div>
-          <div class="delta">${corrLabel(skuCorrMonth.r)} · 표본 ${skuCorrMonth.n}일</div></div>
-      </div>
+      <h2>요일별 목표 CS처리량 (월간)</h2>
       <table>
-        <thead><tr><th>요일</th><th>평균 배송물량</th><th>목표 CS처리량(인당)</th><th>물량-인입 상관도</th></tr></thead>
+        <thead><tr><th>요일</th><th>목표 CS처리량(인당)</th></tr></thead>
         <tbody>
           ${[1,2,3,4,5,6].map(wd => {
-            const c = skuCorrByWeekdayM[wd];
             return `<tr>
               <td style="text-align:left;">${WEEKDAY_KO[wd]}</td>
-              <td>${fmtNum(skuWeekdayAvgM[wd])}</td>
               <td>${weekdayTargetLabel(weekdayTargetsM[wd])}</td>
-              <td style="font-size:11.5px;color:var(--ink-dim);">${c && c.r!=null ? corrLabel(c.r)+` · ${c.n}일` : '표본 부족'}</td>
             </tr>`;
           }).join("")}
         </tbody>
       </table>
-      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">상관계수(r)는 −1~+1 사이 값이며, 상관관계가 인과관계를 뜻하지는 않습니다.</div>
+      <div style="font-size:11px;color:var(--ink-dim);margin-top:10px;">목표 CS처리량은 같은 요일 기준(Punisher 제외)입니다.</div>
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -5023,10 +5031,10 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
     charts.issueRank = new Chart(issueRankCanvas, {
       type: "bar",
       data: {
-        labels: issueTodayRanking.map((r,i) => `${i+1}위 ${r.category}`),
+        labels: issueTodayRanking.map(r => r.category),
         datasets: [{
           data: issueTodayRanking.map(r => r.val),
-          backgroundColor: issueTodayRanking.map((r,i) => i<3 ? TIER_COLORS[i] : palette[i % palette.length]+"AA"),
+          backgroundColor: issueTodayRanking.map((r,i) => (ISSUE_COLOR[r.category] || palette[i % palette.length]) + "CC"),
           borderRadius: 4
         }]
       },
@@ -5042,21 +5050,25 @@ function drawCharts({ dates, sections, agents, today, outcall, weekKeys, weeklyB
   if (issueWeeklyCanvas && issueWeekKeys?.length && weeklyByIssue){
     const palette = ["#4C6EF5","#12B886","#F76707","#BE4BDB","#FA5252","#748FFC","#20C997","#845EF7"];
     const cats = Object.keys(weeklyByIssue);
+    const wks = issueWeekKeys.slice(-8);
+    const inq = new Set(ISSUE_GROUPS.filter(g => g.inq).map(g => g.name));
     charts.issueWeekly = new Chart(issueWeeklyCanvas, {
       type: "line",
       data: {
-        labels: issueWeekKeys.map(w => `${w} 주`),
+        labels: wks.map(w => `${w} 주`),
         datasets: cats.map((c,i) => ({
           label: catLabel(c),
-          data: issueWeekKeys.map(w => weeklyByIssue[c][w] ?? 0),
-          borderColor: palette[i % palette.length],
-          backgroundColor: palette[i % palette.length],
+          data: wks.map(w => weeklyByIssue[c][w] ?? 0),
+          borderColor: ISSUE_COLOR[c] || palette[i % palette.length],
+          backgroundColor: ISSUE_COLOR[c] || palette[i % palette.length],
+          borderDash: inq.has(c) ? [5, 4] : undefined,
+          borderWidth: inq.has(c) ? 2 : 2.5,
           tension: .3,
           pointRadius: 3
         }))
       },
       options: { plugins:{legend:{position:"bottom", labels:{boxWidth:10,padding:10,font:{size:11}}}},
-        scales:{ x:{grid:{display:false}}, y:{grid:{color:"#28324D"}, title:{display:true,text:"이슈 건수",font:{size:10}} } } }
+        interaction:{ mode:"index", intersect:false }, scales:{ x:{grid:{display:false}}, y:{beginAtZero:true, grid:{color:"#28324D"}, title:{display:true,text:"상담 건수",font:{size:10}} } } }
     });
   }
 
