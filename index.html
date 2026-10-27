@@ -2083,7 +2083,8 @@ function openClaimModal(kind, key){
   const ctx = window.__claimCtx; if (!ctx) return;
   let items, title, color;
   if (kind === "type"){ const [area, type] = key.split("|"); items = ctx.cur[area].types[type] || []; title = `${CLAIM_AREA_MAP[area].icon} ${type}`; color = CLAIM_AREA_MAP[area].color; }
-  else if (kind === "repeat"){ const rp = (window.__claimRepeat||[])[key]; if (!rp) return; items = rp.items; title = `🔁 ${rp.store} · ${rp.name}`; color = "#F76707"; kind = "product"; }
+  else if (kind === "repeat"){ const [g, ix] = String(key).split(":"); const rp = ((window.__claimRepeat||{})[g]||[])[+ix]; if (!rp) return; items = rp.items;
+    if (g === "product"){ title = `🔁 ${rp.store} · ${rp.name}`; color = CLAIM_AREA_MAP.supplier.color; kind = "product"; } else { title = `🔁 ${rp.store} · ${rp.type}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; } }
   else if (kind === "spike"){ const sp = (window.__claimSpikes||[])[key]; if (!sp) return; items = sp.items; title = `⚡ ${sp.label}`; color = "#F0555B"; kind = "type"; key = sp.area + "|"; }
   else { const pg = (window.__claimProd||[])[key]; if (!pg) return; items = pg.items; title = `📦 ${pg.name} · ${pg.sup}`; color = CLAIM_AREA_MAP.supplier.color; }
   items = items.slice().sort((a,b) => (vipMdKey(b.r.date)*100 + b.r.hour) - (vipMdKey(a.r.date)*100 + a.r.hour));
@@ -2091,7 +2092,9 @@ function openClaimModal(kind, key){
   const sup = top(it => it.supplier), cen = top(it => it.r.center), typ = (() => { const m = {}; items.forEach(it => it.claims.filter(c => c.area === "supplier").forEach(c => m[c.type] = (m[c.type]||0) + 1)); return Object.entries(m).sort((a,b)=>b[1]-a[1]); })();
   const rank = (arr) => arr.slice(0,5).map(([k,n],i) => `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line);font-size:13px;"><span><b style="color:${i<3?color:'var(--ink-dim)'};margin-right:6px;">${i+1}</b>${esc(k)}</span><span style="font-weight:700;">${n}건 <span style="color:var(--ink-dim);font-weight:400;">(${Math.round(n/items.length*100)}%)</span></span></div>`).join("") || `<div style="color:var(--ink-dim);font-size:12.5px;">-</div>`;
   const prodOf = it => it.codes.map(productName).join(", ") || "-";
-  const rowsHTML = (list) => list.map((it,i) => `<tr><td style="text-align:left;color:var(--ink-dim);">${i+1}</td><td style="text-align:left;white-space:nowrap;">${dateLabel(it.r.date)} ${it.r.hour}시</td><td style="text-align:left;">${esc(it.r.center||'-')}</td><td style="text-align:left;color:var(--ink);">${esc(prodOf(it))}</td><td style="text-align:left;">${it.claims.map(c=>esc(c.type)).join(", ")}</td><td style="text-align:left;">${esc(it.supplier||'-')}</td><td>${it.r.url?`<a href="${esc(it.r.url)}" target="_blank" style="color:var(--accent);font-weight:700;">채널톡 ↗</a>`:'-'}</td></tr>`).join("");
+  const prodCell = it => it.codes.length ? it.codes.map(c => `${esc(productName(c))}<div style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--ink-dim);">${esc(c)}</div>`).join("") : "-";
+  const codeRank = codeBreakdown(items).map(([c,n]) => [`${c} · ${productName(c)}`, n]);
+  const rowsHTML = (list) => list.map((it,i) => `<tr><td style="text-align:left;color:var(--ink-dim);">${i+1}</td><td style="text-align:left;white-space:nowrap;">${dateLabel(it.r.date)} ${it.r.hour}시</td><td style="text-align:left;">${esc(it.r.center||'-')}</td><td style="text-align:left;color:var(--ink);">${prodCell(it)}</td><td style="text-align:left;">${it.claims.map(c=>esc(c.type)).join(", ")}</td><td style="text-align:left;">${esc(it.supplier||'-')}</td><td>${it.r.url?`<a href="${esc(it.r.url)}" target="_blank" style="color:var(--accent);font-weight:700;">채널톡 ↗</a>`:'-'}</td></tr>`).join("");
   window.__claimModalItems = items;
   const el = document.createElement("div");
   el.id = "claimModal";
@@ -2112,10 +2115,11 @@ function openClaimModal(kind, key){
       ${kind === "type" && !/^(delivery|service|etc)\|/.test(key) ? `<div class="card" style="padding:12px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">🏭 공급사 TOP 5</div>${rank(sup)}</div>` : ''}
       ${kind === "product" ? `<div class="card" style="padding:12px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">🏷️ 이슈 유형</div>${rank(typ)}</div>` : ''}
       <div class="card" style="padding:12px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">📍 발생 센터 TOP 5</div>${rank(cen)}</div>
+      ${codeRank.length && items.some(it => it.claims.some(c => c.area === "supplier")) ? `<div class="card" style="padding:12px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">🔖 상품코드별 TOP 5 ${codeRank.length > 1 ? `<span style="font-size:11px;color:#F0555B;">(${codeRank.length}종)</span>` : ''}</div>${rank(codeRank)}</div>` : ''}
       ${kind === "type" && /^supplier\|/.test(key) ? `<div class="card" style="padding:12px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">📦 상품 TOP 5</div>${rank(top(it => it.codes.length ? productName(it.codes[0]) : null))}</div>` : ''}
     </div>
     <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-      <input id="claimModalQ" type="search" placeholder="상품 / 센터 / 공급사 검색" style="${VIP_SEL_STYLE}flex:1;min-width:180px;" oninput="filterClaimModal(this.value)">
+      <input id="claimModalQ" type="search" placeholder="상품 / 상품코드 / 센터 / 공급사 검색" style="${VIP_SEL_STYLE}flex:1;min-width:180px;" oninput="filterClaimModal(this.value)">
       <button onclick="downloadClaimCSV()" style="background:#2FBF8F;color:#0F1420;font-weight:700;border:none;">⬇ CSV 다운로드</button>
     </div>
     <div style="overflow:auto;max-height:52vh;"><table style="font-size:12.5px;">
@@ -2128,7 +2132,7 @@ function openClaimModal(kind, key){
 }
 function filterClaimModal(q){
   const items = window.__claimModalItems || []; q = (q||"").trim();
-  const f = !q ? items : items.filter(it => [it.r.center, it.supplier, window.__claimModalProd(it), it.claims.map(c=>c.type).join(" ")].join(" ").includes(q));
+  const f = !q ? items : items.filter(it => [it.r.center, it.supplier, window.__claimModalProd(it), it.codes.join(" "), it.claims.map(c=>c.type).join(" ")].join(" ").toUpperCase().includes(q.toUpperCase()));
   const tb = document.getElementById("claimModalRows"); if (tb) tb.innerHTML = window.__claimModalRows(f);
 }
 function downloadClaimCSV(){
@@ -2190,9 +2194,12 @@ function renderClaim(data){
   const items = allItems.filter(i => curSet.has(i.r.date));
   const cur = bucketCounts[bucketCounts.length-1], prev = bucketCounts.length > 1 ? bucketCounts[bucketCounts.length-2] : null;
   window.__claimCtx = { cur, items };
-  const spikeHTML = buildSpikeCardHTML(detectClaimSpikes(allItems, buckets), title, claimPeriod !== "daily", claimPeriod==='daily' ? "직전 4영업일" : claimPeriod==='weekly' ? "직전 4주" : "직전 월", false);
+  const spikeList = detectClaimSpikes(allItems, buckets), spikePrev = claimPeriod==='daily' ? "직전 4영업일" : claimPeriod==='weekly' ? "직전 4주" : "직전 월";
+  const spikeHTML = buildSpikeCardHTML(spikeList, title, claimPeriod !== "daily", spikePrev);
   const repeatEnd = buckets[buckets.length-1].dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b)).pop();
-  const repeatHTML = buildRepeatStoreCardHTML(detectRepeatStores(allItems, repeatEnd), repeatEnd);
+  const repeatData = detectRepeatStores(allItems, repeatEnd);
+  const repeatHTML = buildRepeatStoreCardHTML(repeatData, repeatEnd);
+  const reviewHTML = buildClaimReviewBarHTML(spikeList, repeatData, { title, prevLabel: spikePrev, endMd: repeatEnd, multiDay: claimPeriod !== "daily" });
   const totalCur = items.length;
   const totalPrev = prev ? (() => { const s = new Set(buckets[buckets.length-2].dates); return allItems.filter(i => s.has(i.r.date)).length; })() : null;
 
@@ -2243,6 +2250,7 @@ function renderClaim(data){
     <div onclick="openClaimModal('product',${i})" style="display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
       <b style="width:22px;color:${i<3?CLAIM_AREA_MAP.supplier.color:'var(--ink-dim)'};">${i+1}</b>
       <div style="flex:1;min-width:0;"><div style="font-weight:700;color:var(--ink);">${esc(p.name)} <span style="font-size:11.5px;color:var(--ink-dim);font-weight:400;">· ${esc(p.sup)}</span></div>
+        <div style="margin-top:3px;">${codeChipsHTML(codeBreakdown(p.items, p.name))}</div>
         <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;">${Object.entries(p.types).sort((a,b)=>b[1]-a[1]).map(([t,n]) => `<span style="font-size:11.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:1px 8px;">${esc(t)} <b>${n}</b></span>`).join("")}</div></div>
       <div style="font-size:18px;font-weight:800;">${p.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;">상세 ›</span>
@@ -2252,6 +2260,7 @@ function renderClaim(data){
   app.innerHTML = nav(picker) + `
     <div style="font-size:15px;font-weight:700;margin:-6px 0 10px;">${claimPeriod==='daily'?'일간':claimPeriod==='weekly'?'주간':'월간'} · ${title}</div>
     ${kpis}
+    ${reviewHTML}
     ${spikeHTML}
     ${repeatHTML}
     ${areaHTML}
@@ -2263,15 +2272,37 @@ function renderClaim(data){
     </div>`;
 }
 
+/* ---- 상품코드 세부: 같은 상품명이라도 히어로코드가 다를 수 있어 코드별 건수를 함께 표시 ---- */
+function codeBreakdown(items, name){
+  const m = {};
+  items.forEach(it => new Set(it.codes.filter(c => !name || productName(c) === name)).forEach(c => m[c] = (m[c]||0) + 1));
+  return Object.entries(m).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]));
+}
+function codeChipsHTML(list, max){
+  if (!list.length) return "";
+  max = max || 4;
+  const multi = list.length > 1;
+  return `<span style="display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;vertical-align:middle;">${multi ? `<span style="font-size:10.5px;font-weight:700;color:#F0555B;">코드 ${list.length}종</span>` : ''}${list.slice(0, max).map(([c,n]) => `<span style="font-family:ui-monospace,Menlo,monospace;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:0 6px;color:var(--ink-dim);">${esc(c)}${multi ? ` <b style="color:var(--ink);">${n}</b>` : ''}</span>`).join("")}${list.length > max ? `<span style="font-size:11px;color:var(--ink-dim);">외 ${list.length - max}</span>` : ''}</span>`;
+}
+function codeText(list, max){ max = max || 3; return list.length ? list.slice(0, max).map(([c,n]) => list.length > 1 ? `${c} ${n}건` : c).join(", ") + (list.length > max ? ` 외 ${list.length-max}` : "") : ""; }
+function spikeProdName(s){ return s.level === "P" ? s.key.split("|").slice(2).join("|") : null; }
+
 /* ---- 클레임 급증 인사이트: "어느 날, 어느 공급사(센터)에서, 어떤 클레임이 평소보다 갑자기 늘었나" ---- */
 // 기준: 이번 기간 건수 vs 직전 기간들(최대 4개) 평균. 3건 이상 & 평소의 2배 이상(또는 평소 0건) & 2건 이상 증가 → 급증
 const SPIKE_MIN = 3, SPIKE_RATIO = 2, SPIKE_DIFF = 2;
-const SPIKE_DEPT = { supplier:{ name:"영업·MD", color:"#E8A33D" }, delivery:{ name:"물류·센터", color:"#4C6EF5" }, service:{ name:"서비스·개발", color:"#BE4BDB" }, etc:{ name:"유관부서", color:"#20C997" } };
+const SPIKE_DEPT = { supplier:{ name:"MD", color:"#E8A33D" }, delivery:{ name:"물류·센터", color:"#4C6EF5" }, service:{ name:"서비스·개발", color:"#BE4BDB" }, etc:{ name:"유관부서", color:"#20C997" } };
+// 팀별 리뷰 섹션 = Slack 봇의 팀 멘션 단위. mention 은 붙여넣기용 표기이며,
+// 봇으로 보낼 때는 Slack 사용자그룹 ID 형식(<!subteam^S0XXXXXX>)으로 바꾸면 실제 멘션됩니다.
+const CLAIM_TEAMS = [
+  { key:"product",  areas:["supplier"],      icon:"📦", name:"상품 클레임",  team:"MD",             mention:"@MD",   color:"#E8A33D" },
+  { key:"delivery", areas:["delivery"],      icon:"🚚", name:"배송 클레임",  team:"물류·센터",      mention:"@물류", color:"#4C6EF5" },
+  { key:"other",    areas:["service","etc"], icon:"🛠️", name:"서비스·기타", team:"서비스·유관부서", mention:"@CX",   color:"#BE4BDB" },
+];
 function detectClaimSpikes(allItems, buckets){
   if (!buckets || buckets.length < 2) return [];
   const bi = {}; buckets.forEach((b, i) => b.dates.forEach(d => bi[d] = i));
   const cur = buckets.length - 1, prevN = Math.min(4, cur);
-  const groups = {}; // key -> { area, label, counts[], items(cur), types{} }
+  const groups = {};
   const add = (key, area, label, it, type) => {
     const i = bi[it.r.date]; if (i == null) return;
     const g = groups[key] = groups[key] || { key, area, label, counts: buckets.map(() => 0), seen: buckets.map(() => new Set()), items: [], types:{}, typeSeen: new Set() };
@@ -2307,87 +2338,137 @@ function detectClaimSpikes(allItems, buckets){
   // 같은 공급사에서 상품 급증이 잡히면 공급사 전체 줄은 생략 (중복 방지)
   const prodSup = new Set(out.filter(x => x.level === "P").map(x => x.key.split("|")[1]));
   return out.filter(x => !(x.level === "S" && prodSup.has(x.key.split("|")[1])))
-            .sort((a,b) => (b.now - b.base) - (a.now - a.base) || b.now - a.now).slice(0, 10);
+            .sort((a,b) => (b.now - b.base) - (a.now - a.base) || b.now - a.now);
 }
 function spikeSentence(s, multiDay){
   const tl = Object.entries(s.types).sort((a,b)=>b[1]-a[1]).slice(0,2);
   const types = (tl.length === 1 && s.label.endsWith(tl[0][0])) ? "" : tl.map(([t,n]) => `${t} ${n}`).join(" · "); // 라벨에 이미 유형이 있으면 생략
-  const rb = Math.max(1, Math.round(s.base)); // 표시는 정수(반올림), 배수도 반올림한 평소 건수 기준으로 계산
+  const rb = Math.max(1, Math.round(s.base)); // 표시는 정수(반올림), 배수도 반올림한 평소 건수 기준
   const base = s.base ? `평소 ${rb}건 → ${s.now}건 (${Math.round(s.now/rb)}배)` : `평소 0건 → ${s.now}건 (신규)`;
   const when = multiDay && s.peak ? ` · <b>${dateLabel(s.peak[0])}</b>에 ${s.peak[1]}건 집중` : "";
   return { types, base, when };
 }
-function spikeShareText(spikes, title, multiDay){
-  return `[클레임 급증 알림] ${title}\n` + spikes.map((s, i) => { const t = spikeSentence(s, multiDay); return `${i+1}) [${SPIKE_DEPT[s.area].name}] ${s.label} — ${t.types} / ${t.base.replace(/<[^>]+>/g,"")}${t.when.replace(/<[^>]+>/g,"")}`; }).join("\n");
+const SPIKE_PER_TEAM = 5;
+function teamSectionHead(t, n, unit){
+  return `<div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px;padding-bottom:6px;border-bottom:2px solid ${t.color}55;">
+    <span style="font-size:14px;font-weight:800;">${t.icon} ${t.name}</span>
+    <span style="font-size:11px;font-weight:700;border-radius:5px;padding:2px 7px;background:${t.color}26;color:${t.color};">${t.team}</span>
+    <span style="flex:1;"></span><span style="font-size:12px;color:${n?'var(--bad)':'var(--good)'};font-weight:700;">${n ? n + unit : '이상 없음'}</span></div>`;
 }
-function copyClaimSpikes(){
-  const txt = window.__claimSpikeText || ""; if (!txt) return;
-  const done = () => { const b = document.getElementById("spikeCopyBtn"); if (b){ b.textContent = "✅ 복사됨"; setTimeout(() => b.textContent = "📋 공유용 텍스트 복사", 1800); } };
-  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done).catch(() => { prompt("아래 내용을 복사하세요", txt); });
-  else prompt("아래 내용을 복사하세요", txt);
-}
-function buildSpikeCardHTML(spikes, title, multiDay, prevLabel, compact){
+function buildSpikeCardHTML(spikes, title, multiDay, prevLabel){
   window.__claimSpikes = spikes;
-  window.__claimSpikeText = spikes.length ? spikeShareText(spikes, title, multiDay) : "";
-  const rows = spikes.slice(0, compact ? 3 : 10).map((s, i) => { const t = spikeSentence(s, multiDay); const d = SPIKE_DEPT[s.area];
-    return `<div ${compact ? '' : `onclick="openClaimModal('spike',${i})"`} style="display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line);${compact?'':'cursor:pointer;'}">
-      <span style="flex-shrink:0;font-size:11px;font-weight:700;border-radius:5px;padding:2px 7px;background:${d.color}26;color:${d.color};">${d.name}</span>
-      <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;"><b style="color:var(--ink);">${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(t.types)}</span><br>
-        <span style="color:var(--bad);font-weight:700;">▲ ${t.base}</span><span style="color:var(--ink-dim);">${t.when}</span></div>
-      ${compact ? '' : '<span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span>'}
-    </div>`; }).join("");
+  const sections = CLAIM_TEAMS.map(t => {
+    const list = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
+    const rows = list.map(s => { const i = spikes.indexOf(s), x = spikeSentence(s, multiDay);
+      return `<div onclick="openClaimModal('spike',${i})" style="display:flex;gap:10px;align-items:flex-start;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
+        <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;"><b style="color:var(--ink);">${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(x.types)}</span>${s.level === "P" ? `<div style="margin:2px 0;">${codeChipsHTML(codeBreakdown(s.items, spikeProdName(s)))}</div>` : '<br>'}
+          <span style="color:var(--bad);font-weight:700;">▲ ${x.base}</span><span style="color:var(--ink-dim);">${x.when}</span></div>
+        <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
+    return teamSectionHead(t, list.length, "건 급증") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">평소 수준입니다.</div>`);
+  }).join("");
   return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F0555B;">
-    <h2>⚡ 클레임 급증 인사이트<span class="tag">${title} · ${prevLabel} 평균 대비 2배↑ & 3건↑ · 담당 부서 표시</span></h2>
-    ${spikes.length ? rows : `<div style="font-size:13px;color:var(--good);padding:6px 0;">✅ 평소보다 급증한 클레임이 없습니다.</div>`}
-    ${spikes.length && !compact ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;"><button id="spikeCopyBtn" onclick="copyClaimSpikes()">📋 공유용 텍스트 복사</button><span style="font-size:11.5px;color:var(--ink-dim);align-self:center;">메신저·메일로 유관부서에 그대로 붙여 넣을 수 있어요</span></div>` : ''}
+    <h2>⚡ 클레임 급증 인사이트<span class="tag">${title} · ${prevLabel} 평균 대비 2배↑ & 3건↑ · 섹션별 최대 ${SPIKE_PER_TEAM}건</span></h2>
+    <div style="margin-top:4px;">${sections}</div>
   </div>`;
 }
 
-/* ---- 반복 클레임 업장: "특정 업장이 같은 상품으로 계속 클레임을 거는가" (CS 관점) ---- */
-// 기준: 기준일 포함 최근 30일 · 같은 업장 + 같은 상품(상품명·공급사)으로 공급사 클레임 3건 이상 · 서로 다른 2일 이상 발생
-const REPEAT_DAYS = 30, REPEAT_MIN = 3, REPEAT_MIN_DAYS = 2;
+/* ---- 반복 클레임 업장 (CS 관점): 같은 업장이 같은 상품 / 같은 배송 유형으로 계속 클레임하는가 ---- */
+// 기준: 기준일 포함 최근 30일 · 같은 업장 + (같은 상품 | 같은 배송 유형) 3건 이상 · 서로 다른 2일 이상 발생
+const REPEAT_DAYS = 30, REPEAT_MIN = 3, REPEAT_MIN_DAYS = 2, REPEAT_PER_TEAM = 5;
 function detectRepeatStores(allItems, endMd){
-  if (!endMd) return [];
+  const empty = { product:[], delivery:[] };
+  if (!endMd) return empty;
   const end = new Date(mdToISO(endMd)).getTime(), DAY = 864e5;
   const inWin = d => { const t = new Date(mdToISO(d)).getTime(); return t <= end && t > end - REPEAT_DAYS * DAY; };
-  const g = {}, storeTotal = {};
+  const gp = {}, gd = {}, storeTotal = {};
+  const grp = (g, k, init, it) => { const x = g[k] = g[k] || { ...init, items:[], days:new Set(), types:{}, centers:{} }; x.items.push(it); x.days.add(it.r.date); if (it.r.center) x.centers[it.r.center] = (x.centers[it.r.center]||0) + 1; return x; };
   allItems.forEach(it => {
     const store = (it.r.store || "").trim(); if (!store || !inWin(it.r.date)) return;
-    storeTotal[store] = storeTotal[store] || new Set(); storeTotal[store].add(it);
-    const sc = it.claims.filter(c => c.area === "supplier"); if (!sc.length) return;
-    const keys = new Map();
-    it.codes.forEach(code => { const name = productName(code); const sup = normalizeSupplier(it.supplier || productMaster?.[code]?.dist || "") || "-"; keys.set(`${store}|${name}|${sup}`, { name, sup }); });
-    keys.forEach((v, k) => {
-      const x = g[k] = g[k] || { store, name:v.name, sup:v.sup, items:[], days:new Set(), types:{} };
-      x.items.push(it); x.days.add(it.r.date);
-      sc.forEach(c => x.types[c.type] = (x.types[c.type]||0) + 1);
-    });
+    (storeTotal[store] = storeTotal[store] || new Set()).add(it);
+    const sc = it.claims.filter(c => c.area === "supplier");
+    if (sc.length){
+      const keys = new Map();
+      it.codes.forEach(code => { const name = productName(code); const sup = normalizeSupplier(it.supplier || productMaster?.[code]?.dist || "") || "-"; keys.set(`${store}|${name}|${sup}`, { name, sup }); });
+      keys.forEach((v, k) => { const x = grp(gp, k, { store, name:v.name, sup:v.sup }, it); sc.forEach(c => x.types[c.type] = (x.types[c.type]||0) + 1); });
+    }
+    it.claims.filter(c => c.area === "delivery").forEach(c => grp(gd, `${store}|${c.type}`, { store, type:c.type }, it));
   });
-  return Object.values(g).filter(x => x.items.length >= REPEAT_MIN && x.days.size >= REPEAT_MIN_DAYS)
-    .map(x => { const days = [...x.days].sort((a,b)=>vipMdKey(a)-vipMdKey(b)); return { ...x, n:x.items.length, dayList:days, last:days[days.length-1], storeTotal:storeTotal[x.store].size }; })
-    .sort((a,b) => b.n - a.n || vipMdKey(b.last) - vipMdKey(a.last)).slice(0, 10);
+  const fin = g => Object.values(g).filter(x => x.items.length >= REPEAT_MIN && x.days.size >= REPEAT_MIN_DAYS)
+    .map(x => { const days = [...x.days].sort((a,b)=>vipMdKey(a)-vipMdKey(b)); const cen = Object.entries(x.centers).sort((a,b)=>b[1]-a[1])[0];
+      return { ...x, n:x.items.length, dayList:days, last:days[days.length-1], center: cen ? cen[0] : "", storeTotal:storeTotal[x.store].size }; })
+    .sort((a,b) => b.n - a.n || vipMdKey(b.last) - vipMdKey(a.last));
+  return { product: fin(gp), delivery: fin(gd) };
 }
-function buildRepeatStoreCardHTML(list, endMd){
-  window.__claimRepeat = list;
-  const rows = list.map((x, i) => {
-    const share = x.storeTotal ? Math.round(x.n / x.storeTotal * 100) : 0;
-    const types = Object.entries(x.types).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([t,n]) => `${t} ${n}`).join(" · ");
-    const days = x.dayList.slice(-4).map(d => dateLabel(d)).join(", ") + (x.dayList.length > 4 ? " 외" : "");
-    return `<div onclick="openClaimModal('repeat',${i})" style="display:flex;gap:12px;align-items:center;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
-      <b style="width:22px;color:${i<3?'#F76707':'var(--ink-dim)'};">${i+1}</b>
-      <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
-        <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:#F76707;">${esc(x.name)}</b> <span style="font-size:11.5px;color:var(--ink-dim);">· ${esc(x.sup)}</span><br>
-        <span style="font-size:12px;color:var(--ink-dim);">${esc(types)} · ${x.dayList.length}일에 걸쳐 (${days}) · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${share}%</b></span>
-      </div>
-      <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
-      <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span>
-    </div>`; }).join("");
+function repeatDays(x){ return x.dayList.slice(-4).map(d => dateLabel(d)).join(", ") + (x.dayList.length > 4 ? " 외" : ""); }
+function repeatWhat(x, g){ return g === "product" ? `${x.name} · ${x.sup}` : x.type; }
+function repeatDetail(x, g){
+  const share = x.storeTotal ? Math.round(x.n / x.storeTotal * 100) : 0;
+  const types = g === "product" ? Object.entries(x.types).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([t,n]) => `${t} ${n}`).join(" · ") + " · " : (x.center ? `${x.center} · ` : "");
+  return { share, text: `${types}${x.dayList.length}일에 걸쳐 (${repeatDays(x)})` };
+}
+function buildRepeatStoreCardHTML(rep, endMd){
+  window.__claimRepeat = rep;
+  const sec = (t, g) => {
+    const list = rep[g].slice(0, REPEAT_PER_TEAM);
+    const rows = list.map((x, i) => { const d = repeatDetail(x, g);
+      return `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
+        <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
+        <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
+          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatWhat(x, g))}</b>${g === "product" ? `<div style="margin:2px 0;">${codeChipsHTML(codeBreakdown(x.items, x.name))}</div>` : '<br>'}
+          <span style="font-size:12px;color:var(--ink-dim);">${esc(d.text)} · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${d.share}%</b></span></div>
+        <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
+        <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
+    return teamSectionHead(t, rep[g].length, "곳") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">반복 클레임 업장이 없습니다.</div>`);
+  };
   return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F76707;">
-    <h2>🔁 반복 클레임 업장<span class="tag">${dateLabel(endMd)} 기준 최근 ${REPEAT_DAYS}일 · 같은 업장이 같은 상품으로 ${REPEAT_MIN}건↑ (${REPEAT_MIN_DAYS}일 이상)</span></h2>
-    ${list.length ? rows : `<div style="font-size:13px;color:var(--good);padding:6px 0;">✅ 같은 상품으로 반복 클레임한 업장이 없습니다.</div>`}
-    ${list.length ? `<div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">상품 문제인지, 업장의 사용·보관·기대 수준 차이인지 확인이 필요한 업장입니다. 누르면 해당 상담의 채널톡 링크가 열립니다.</div>` : ''}
+    <h2>🔁 반복 클레임 업장<span class="tag">${dateLabel(endMd)} 기준 최근 ${REPEAT_DAYS}일 · 같은 업장이 같은 상품(배송 유형)으로 ${REPEAT_MIN}건↑, ${REPEAT_MIN_DAYS}일 이상</span></h2>
+    <div style="margin-top:4px;">${sec(CLAIM_TEAMS[0], "product")}${sec(CLAIM_TEAMS[1], "delivery")}</div>
+    <div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">상품: 상품 문제인지 업장의 보관·기대 수준 차이인지 확인 · 배송: 해당 업장 주소·출입·배송 동선 점검. 누르면 채널톡 링크가 열립니다.</div>
   </div>`;
 }
+
+/* ---- 팀별 이슈 리뷰 텍스트 (Slack 공유용 · 향후 봇 포맷과 동일 구조) ---- */
+function buildClaimReviewText(spikes, rep, ctx, teamKey){
+  const strip = s => String(s||"").replace(/<[^>]+>/g, "");
+  const line = "━━━━━━━━━━━━━━━━━━";
+  let out = `*[클레임 VOC 이슈 리뷰] ${ctx.title}*\n`;
+  out += `_급증: ${ctx.prevLabel} 평균 대비 2배↑·3건↑ / 반복 업장: ${dateLabel(ctx.endMd)} 기준 최근 ${REPEAT_DAYS}일 ${REPEAT_MIN}건↑_\n`;
+  CLAIM_TEAMS.filter(t => !teamKey || t.key === teamKey).forEach(t => {
+    const sp = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
+    out += `${line}\n${t.icon} *${t.name}* ${t.mention}\n`;
+    out += `⚡ 급증: ${sp.length ? sp.length + "건" : "없음"}\n`;
+    sp.forEach((s, i) => { const x = spikeSentence(s, ctx.multiDay); const ct = s.level === "P" ? codeText(codeBreakdown(s.items, spikeProdName(s))) : ""; out += `   ${i+1}) ${s.label}${ct ? ` [${ct}]` : ""}${x.types ? ` — ${x.types}` : ""} / ${strip(x.base)}${strip(x.when)}\n`; });
+    if (rep[t.key]){
+      const rp = rep[t.key].slice(0, REPEAT_PER_TEAM);
+      out += `🔁 반복 업장: ${rep[t.key].length ? rep[t.key].length + "곳" : "없음"}\n`;
+      rp.forEach((x, i) => { const d = repeatDetail(x, t.key); const ct = t.key === "product" ? codeText(codeBreakdown(x.items, x.name)) : ""; out += `   ${i+1}) ${x.store} → ${repeatWhat(x, t.key)}${ct ? ` [${ct}]` : ""} ${x.n}건 · ${d.text}\n`; });
+    }
+  });
+  return out.trim();
+}
+function buildClaimReviewBarHTML(spikes, rep, ctx){
+  const texts = { all: buildClaimReviewText(spikes, rep, ctx) };
+  CLAIM_TEAMS.forEach(t => texts[t.key] = buildClaimReviewText(spikes, rep, ctx, t.key));
+  window.__claimReviewTexts = texts;
+  const cnt = t => spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM).length + (rep[t.key] ? Math.min(REPEAT_PER_TEAM, rep[t.key].length) : 0);
+  return `<div class="card" style="margin-bottom:16px;">
+    <h2>📣 팀별 이슈 리뷰<span class="tag">아래 급증·반복 업장을 팀별로 묶은 Slack 공유용 텍스트</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button onclick="copyClaimReview('all',this)" style="background:var(--accent);color:#0F1420;font-weight:700;border:none;">📋 전체 복사</button>
+      ${CLAIM_TEAMS.map(t => `<button onclick="copyClaimReview('${t.key}',this)" style="border-color:${t.color};">${t.icon} ${t.team} <b style="color:${cnt(t)?'var(--bad)':'var(--ink-dim)'};">${cnt(t)}</b></button>`).join("")}
+    </div>
+    <details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12.5px;color:var(--ink-dim);">미리보기</summary>
+      <pre style="white-space:pre-wrap;font-size:12px;line-height:1.6;background:var(--panel-2);border-radius:8px;padding:10px 12px;margin-top:6px;">${esc(texts.all)}</pre></details>
+  </div>`;
+}
+function copyClaimReview(k, btn){
+  const txt = (window.__claimReviewTexts || {})[k] || ""; if (!txt) return;
+  const old = btn ? btn.innerHTML : "";
+  const done = () => { if (btn){ btn.innerHTML = "✅ 복사됨"; setTimeout(() => btn.innerHTML = old, 1600); } };
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done).catch(() => prompt("아래 내용을 복사하세요", txt));
+  else prompt("아래 내용을 복사하세요", txt);
+}
+
 // 메인 화면용: 기간에 맞는 비교 구간 생성
 function spikeBucketsFor(rawLog, dates){
   const allDates = [...new Set(rawLog.map(r => r.date))].sort((a,b)=>vipMdKey(a)-vipMdKey(b));
