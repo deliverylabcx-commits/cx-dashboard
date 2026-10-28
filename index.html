@@ -554,6 +554,20 @@ function parseOutCall(text){
   return { dates: dateCols.map(d=>d.date), categories, data };
 }
 
+/* ---- Out Call 시트 누락 점검: 온보딩 RAW(신규 온보딩 탭)에는 있는데 Out Call_Tracking 시트에 행이 없는 담당자 ---- */
+function outcallSheetGapHTML(data, dateArr){
+  const oc = data.onboardCalls || [], o = data.outcall || {}, set = new Set(dateArr || []);
+  const sheetAgents = new Set(); (o.categories || []).forEach(c => Object.keys(o.data[c] || {}).forEach(e => sheetAgents.add(e)));
+  if (!sheetAgents.size || !oc.length) return "";
+  let rawN = 0; const miss = {};
+  oc.forEach(x => { if (!set.has(x.dateMD) || !x.agent || CALL_EXCLUDED_AGENTS.includes(x.agent)) return; rawN++; if (!sheetAgents.has(x.agent)) miss[x.agent] = (miss[x.agent] || 0) + 1; });
+  const names = Object.entries(miss); if (!names.length) return "";
+  const sheetN = sum([...set].map(d => sum((o.categories || []).map(c => o.data[c]?.Total?.["인입"]?.[d] || 0))));
+  return `<div style="background:#F0555B1F;border:1px solid #F0555B66;border-radius:8px;padding:8px 12px;margin:-4px 0 12px;font-size:12.5px;line-height:1.6;">
+    ⚠️ <b>Out Call 시트에 행이 없는 담당자</b>: ${names.map(([a, n]) => `<b>${esc(a)}</b> ${n}건`).join(", ")} — 아래 수치(Total·담당자별)에서 빠져 있습니다.
+    <span style="color:var(--ink-dim);">(온보딩 RAW ${fmtNum(rawN)}건 / 시트 Total ${fmtNum(sheetN)}건 · 시트에 담당자 행을 추가하면 자동 반영)</span></div>`;
+}
+
 /* ===================== 지연 로우데이터 파싱 (30분 지연 체크 / 응대지연_보류 공용) ===================== */
 function parseDelayRows(text){
   const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
@@ -3227,7 +3241,8 @@ function renderCore(data){
     if (outcall && outcall.categories?.length){
       const catRates = outcall.categories.map(c => {
         const t = outcall.data[c]?.["Total"];
-        const rate = clampPct(t?.["통화완료_%"]?.[today]);
+        const inb = t?.["인입"]?.[today] || 0; // 완료율은 시트 % 대신 건수로 직접 계산 (시트 화요일 열 2·5발주 % 수식 오류 대응)
+        const rate = inb ? (t?.["통화완료"]?.[today] || 0) / inb : null;
         return [c, rate];
       }).filter(([,v]) => v!=null);
       if (catRates.length){
@@ -3466,6 +3481,7 @@ function renderCore(data){
     <div class="grid1">
       <div class="card">
         <h2>아웃콜 목표 달성 현황 <span class="tag">${dateLabel(today)} · 카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallSheetGapHTML(data, [today])}
         ${outcallCats.map(cat => buildOutcallTargetCardHTML(cat, outcallAchToday[cat], outcallRateToday[cat], "당일")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
         <div style="font-size:11px;color:var(--ink-dim);margin-top:6px;line-height:1.6;">
           통화량 목표는 CS 처리량과 동일한 방식(최근 4주 같은 요일 · 근무일 기준 · Punisher 제외)으로 산정합니다. 통화완료율 타겟은 카테고리 공통 ${Math.round(OUTCALL_TARGET_RATE*100)}%입니다.
@@ -3544,12 +3560,13 @@ function renderCore(data){
     <div class="grid1">
       <div class="card">
         <h2>Out Call_Tracking <span class="tag">카테고리별 · ${dateLabel(today)} · 성공률 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallSheetGapHTML(data, [today])}
         <div class="kpis" style="margin-bottom:16px;">
           ${(outcall.categories||[]).map(c => {
             const t = outcall.data[c]?.["Total"];
             const inbound = t?.["인입"]?.[today] || 0;
             const completed = t?.["통화완료"]?.[today] || 0;
-            const rate = clampPct(t?.["통화완료_%"]?.[today]);
+            const rate = inbound ? completed / inbound : null; // 시트 % 대신 건수로 계산
             const surveyed = t?.["미처리"]?.[today] || 0;
             const gapPt = rate!=null ? (rate - OUTCALL_TARGET_RATE) : null;
             const needed = Math.max(0, Math.ceil(inbound*OUTCALL_TARGET_RATE) - completed);
@@ -4057,6 +4074,7 @@ function renderWeekly(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>아웃콜 목표 달성 현황 (주간) <span class="tag">카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallSheetGapHTML(data, week.dates)}
       ${outcallCatsW.map(cat => buildOutcallTargetCardHTML(cat, outcallAchWeek[cat], outcallRateWeek[cat], "주간")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
     </div>
 
@@ -4713,6 +4731,7 @@ function renderMonthly(data){
 
     <div class="card" style="margin-bottom:16px;">
       <h2>아웃콜 목표 달성 현황 (월간) <span class="tag">카테고리별 통화량 목표 + 완료율 타겟 ${Math.round(OUTCALL_TARGET_RATE*100)}%</span></h2>
+        ${outcallSheetGapHTML(data, month.dates)}
       ${outcallCatsM.map(cat => buildOutcallTargetCardHTML(cat, outcallAchMonth[cat], outcallRateMonth[cat], "월간")).join("") || '<div style="color:var(--ink-dim);font-size:13px;">아웃콜 데이터 없음</div>'}
     </div>
 
