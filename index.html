@@ -2123,7 +2123,9 @@ function openClaimModal(kind, key){
   let items, title, color;
   if (kind === "type"){ const [area, type] = key.split("|"); items = ctx.cur[area].types[type] || []; title = `${CLAIM_AREA_MAP[area].icon} ${type}`; color = CLAIM_AREA_MAP[area].color; }
   else if (kind === "repeat"){ const [g, ix] = String(key).split(":"); const rp = ((window.__claimRepeat||{})[g]||[])[+ix]; if (!rp) return; items = rp.items;
-    if (g === "product"){ title = `🔁 ${rp.store} · ${rp.name}`; color = CLAIM_AREA_MAP.supplier.color; kind = "product"; } else { title = `🔁 ${rp.store} · ${rp.type}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; } }
+    if (g === "product"){ title = `🔁 ${rp.store} · ${pname_(rp)} (${rp.code})`; color = CLAIM_AREA_MAP.supplier.color; kind = "product"; } else { title = `🔁 ${rp.store} · 배송 클레임`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; } }
+  else if (kind === "daily"){ const [g, ix] = String(key).split(":"); const dx = ((window.__claimDaily||{})[g]||[])[+ix]; if (!dx) return; items = dx.items;
+    if (g === "md"){ title = `📌 ${pname_(dx)} (${dx.code}) · ${dx.sup}`; color = CLAIM_AREA_MAP.supplier.color; kind = "product"; } else { title = `📌 ${dx.center} · ${dx.type}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; } }
   else if (kind === "cell"){ const c = (window.__claimCell||[])[key]; if (!c) return; items = c.items; title = `🚚 ${c.title}`; color = CLAIM_AREA_MAP.delivery.color; kind = "type"; key = "delivery|"; }
   else if (kind === "spike"){ const sp = (window.__claimSpikes||[])[key]; if (!sp) return; items = sp.items; title = `⚡ ${sp.label}`; color = "#F0555B"; kind = "type"; key = sp.area + "|"; }
   else { const pg = (window.__claimProd||[])[key]; if (!pg) return; items = pg.items; title = `📦 ${pg.name} · ${pg.sup}`; color = CLAIM_AREA_MAP.supplier.color; }
@@ -2237,10 +2239,12 @@ function renderClaim(data){
   const spikeList = detectClaimSpikes(allItems, buckets), spikePrev = claimPeriod==='daily' ? "직전 4영업일" : claimPeriod==='weekly' ? "직전 4주" : "직전 월";
   const spikeHTML = buildSpikeCardHTML(spikeList, title, claimPeriod !== "daily", spikePrev);
   const repeatEnd = buckets[buckets.length-1].dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b)).pop();
-  const repeatData = detectRepeatStores(allItems, repeatEnd, claimPeriod === "daily");
-  const repeatHTML = buildRepeatStoreCardHTML(repeatData, repeatEnd);
+  const repeatData = detectRepeatStores(allItems, repeatEnd, claimPeriod);
+  const repeatHTML = buildRepeatStoreCardHTML(repeatData);
+  const dailyData = claimPeriod === "daily" ? detectDailyIssues(allItems, repeatEnd) : null;
+  const dailyHTML = dailyData ? buildDailyIssueCardHTML(dailyData) : "";
   const wdHTML = buildWeekdayClaimCard(allItems, allDates, repeatEnd, claimPeriod === "monthly" ? buckets[buckets.length-1].dates : null, title);
-  const reviewHTML = buildClaimReviewBarHTML(spikeList, repeatData, { title, prevLabel: spikePrev, endMd: repeatEnd, multiDay: claimPeriod !== "daily" });
+  const reviewHTML = buildClaimReviewBarHTML(spikeList, repeatData, { title, prevLabel: spikePrev, endMd: repeatEnd, multiDay: claimPeriod !== "daily", daily: dailyData });
   const totalCur = items.length;
   const totalPrev = prev ? (() => { const s = new Set(buckets[buckets.length-2].dates); return allItems.filter(i => s.has(i.r.date)).length; })() : null;
 
@@ -2325,13 +2329,15 @@ function renderClaim(data){
     <div style="font-size:15px;font-weight:700;margin:-6px 0 10px;">${claimPeriod==='daily'?'일간':claimPeriod==='weekly'?'주간':'월간'} · ${title}</div>
     ${kpis}
     ${reviewHTML}
-    ${spikeHTML}
+    ${dailyHTML}
     ${repeatHTML}
+    ${spikeHTML}
     ${wdHTML}
     ${areaHTML}
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.supplier.color};"><h2>📦 클레임 상품 TOP 10<span class="tag">공급사 클레임 · 상품별 유형 건수${pmNote} · 누르면 채널톡 링크</span></h2>${prodHTML}</div>
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.delivery.color};"><h2>🚚 배송 클레임 · 센터 TOP 10<span class="tag">센터별 이슈 유형 건수 · 숫자를 누르면 채널톡 링크</span></h2>${delivHTML}</div>
     <div class="footer-note">
+      데일리 VOC 기준(유관부서 합의 · 칸반 보드와 동일): 📌 데일리 이슈 — MD 당일 같은 상품코드 ${VOC_RULE.dailyMdMin}회↑ / SCM 당일 배송 클레임 발생 센터(센터·사유별) · 🔁 반복 사업장 — MD ${VOC_RULE.repeat.weekly.days}일 이내 같은 사업장·같은 상품코드 ${VOC_RULE.repeat.weekly.min}회↑ / SCM ${VOC_RULE.repeat.weekly.days}일 이내 같은 사업장 배송 클레임 ${VOC_RULE.repeat.weekly.min}회↑(유형 합산) · 일간은 당일 접수 건 포함 사업장, 월간은 ${VOC_RULE.repeat.monthly.days}일 기준.<br>
       분류: CX Play Book 「채널톡_태그관리」 기준 — 공급사 클레임(공급사클레임·품질불량), 배송 클레임(배송클레임·FC배송), 서비스 클레임(서비스이용클레임), 기타(유관부서 전달).<br>
       유형은 tags 3depth를 단순화했습니다(품질불량의 환불·퀵 등 처리방안, "(배송기사)"·"(보냉불량)" 꼬리표 제외 · 분리/익일배송→미배송, 정정배송→오배송). 한 상담에 여러 유형이 있으면 유형별로 각각 셉니다.<br>
       상품은 상담 설명의 HERO 코드를 상품 매칭 시트(히어로코드·유통사명·상품명)와 매칭하고, 같은 상품명·같은 공급사는 하나로 묶습니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
@@ -2384,12 +2390,12 @@ function spikeProdName(s){ return s.level === "P" ? s.key.split("|").slice(2).jo
 /* ---- 클레임 급증 인사이트: "어느 날, 어느 공급사(센터)에서, 어떤 클레임이 평소보다 갑자기 늘었나" ---- */
 // 기준: 이번 기간 건수 vs 직전 기간들(최대 4개) 평균. 3건 이상 & 평소의 2배 이상(또는 평소 0건) & 2건 이상 증가 → 급증
 const SPIKE_MIN = 3, SPIKE_RATIO = 2, SPIKE_DIFF = 2;
-const SPIKE_DEPT = { supplier:{ name:"MD", color:"#E8A33D" }, delivery:{ name:"물류·센터", color:"#4C6EF5" }, service:{ name:"서비스·개발", color:"#BE4BDB" }, etc:{ name:"유관부서", color:"#20C997" } };
+const SPIKE_DEPT = { supplier:{ name:"MD", color:"#E8A33D" }, delivery:{ name:"SCM", color:"#4C6EF5" }, service:{ name:"서비스·개발", color:"#BE4BDB" }, etc:{ name:"유관부서", color:"#20C997" } };
 // 팀별 리뷰 섹션 = Slack 봇의 팀 멘션 단위. mention 은 붙여넣기용 표기이며,
 // 봇으로 보낼 때는 Slack 사용자그룹 ID 형식(<!subteam^S0XXXXXX>)으로 바꾸면 실제 멘션됩니다.
 const CLAIM_TEAMS = [
   { key:"product",  areas:["supplier"],      icon:"📦", name:"상품 클레임",  team:"MD",             mention:"@MD",   color:"#E8A33D" },
-  { key:"delivery", areas:["delivery"],      icon:"🚚", name:"배송 클레임",  team:"물류·센터",      mention:"@물류", color:"#4C6EF5" },
+  { key:"delivery", areas:["delivery"],      icon:"🚚", name:"배송 클레임",  team:"SCM",            mention:"@SCM",  color:"#4C6EF5" },
   { key:"other",    areas:["service","etc"], icon:"🛠️", name:"서비스·기타", team:"서비스·유관부서", mention:"@CX",   color:"#BE4BDB" },
 ];
 function detectClaimSpikes(allItems, buckets){
@@ -2509,93 +2515,172 @@ function drawWeekdayChart(){
       scales:{ x:{ offset:true, grid:{ display:false } }, y:{ beginAtZero:true, grid:{ color:"#28324D" }, ticks:{ precision:0 } } } } });
 }
 
-/* ---- 반복 클레임 업장 (CS 관점): 같은 업장이 같은 상품 / 같은 배송 유형으로 계속 클레임하는가 ---- */
-// 기준: 기준일 포함 최근 30일 · 같은 업장 + (같은 상품 | 같은 배송 유형) 3건 이상 · 서로 다른 2일 이상 발생
-const REPEAT_DAYS = 30, REPEAT_MIN = 3, REPEAT_MIN_DAYS = 2, REPEAT_PER_TEAM = 5;
-function detectRepeatStores(allItems, endMd, daily){
-  const empty = { product:[], delivery:[] };
-  if (!endMd) return empty;
+/* ======== 데일리 VOC 기준 (유관부서 합의 · 클레임 칸반 보드(RC 스크립트)와 동일 기준) ========
+   반복 클레임 사업장
+    · MD  : 7일 이내 같은 사업장 + 같은 상품코드 클레임 2회(상담) 이상
+    · SCM : 7일 이내 같은 사업장 배송 클레임 2회(상담) 이상 — 유형 무관(파손·오배송 등 합산)
+    · 일간 = 선택일 접수 건이 포함된 사업장만(=당일 티켓 대상) · 주간 = 7일 · 월간 = 30일
+   데일리 이슈 (일간)
+    · MD  : 당일 같은 상품코드 클레임 3회 이상
+    · SCM : 당일 배송 클레임 1회 이상 발생 센터 — 센터 + 클레임 사유 단위 (칸반 티켓 1건 = 센터·사유·날짜)
+   ※ 기준 변경 시 이 객체와 RC 스크립트(RC_CFG)를 함께 수정 */
+const VOC_RULE = {
+  repeat: { daily:{ days:7, min:2, today:true }, weekly:{ days:7, min:2 }, monthly:{ days:30, min:2 } },
+  dailyMdMin: 3, dailyScmMin: 1,
+};
+const REPEAT_PER_TEAM = 5;
+const CLAIM_BOARD_URL = "https://script.google.com/macros/s/AKfycby4ubqxlnx_J8J04xJdInhji0Lt7hDou5zjwUcxrV_Uh6Was1J5oFdCegvfKQ5j-6eS/exec";
+const boardLinkHTML = (label) => `<a href="${CLAIM_BOARD_URL}" target="_blank" rel="noopener" style="color:var(--accent);font-weight:700;font-size:12px;white-space:nowrap;">${label || '🗂 칸반에서 조치 확인 ↗'}</a>`;
+const typesText = (o, max) => Object.entries(o || {}).sort((a,b) => b[1]-a[1]).slice(0, max || 3).map(([t,n]) => `${t} ${n}`).join(" · ");
+const pname_ = (x) => (x.name && x.name !== x.code) ? x.name : '상품명 미확인'; // 상품 마스터에 없는 코드
+const supOf_ = (it, code) => normalizeSupplier(it.supplier || productMaster?.[code]?.dist || "") || "-";
+
+/* ---- 반복 클레임 사업장 ---- */
+function detectRepeatStores(allItems, endMd, period){
+  const rule = VOC_RULE.repeat[period] || VOC_RULE.repeat.daily;
+  const out = { product:[], delivery:[], period: period || "daily", rule, endMd };
+  if (!endMd) return out;
   const end = new Date(mdToISO(endMd)).getTime(), DAY = 864e5;
-  const inWin = d => { const t = new Date(mdToISO(d)).getTime(); return t <= end && t > end - REPEAT_DAYS * DAY; };
-  const gp = {}, gd = {}, storeTotal = {};
-  const grp = (g, k, init, it) => { const x = g[k] = g[k] || { ...init, items:[], days:new Set(), types:{}, centers:{} }; x.items.push(it); x.days.add(it.r.date); if (it.r.center) x.centers[it.r.center] = (x.centers[it.r.center]||0) + 1; return x; };
+  const inWin = d => { const t = new Date(mdToISO(d)).getTime(); return t <= end && t > end - rule.days * DAY; };
+  const gp = {}, gd = {};
+  const grp = (g, k, init, it) => {
+    const x = g[k] = g[k] || { ...init, key:k, items:[], seen:new Set(), days:new Set(), types:{}, centers:{} };
+    if (x.seen.has(it)) return null;
+    x.seen.add(it); x.items.push(it); x.days.add(it.r.date);
+    if (it.r.center) x.centers[it.r.center] = (x.centers[it.r.center]||0) + 1;
+    return x;
+  };
   allItems.forEach(it => {
     const store = (it.r.store || "").trim(); if (!store || !inWin(it.r.date)) return;
-    (storeTotal[store] = storeTotal[store] || new Set()).add(it);
     const sc = it.claims.filter(c => c.area === "supplier");
-    if (sc.length){
-      const keys = new Map();
-      it.codes.forEach(code => { const name = productName(code); const sup = normalizeSupplier(it.supplier || productMaster?.[code]?.dist || "") || "-"; keys.set(`${store}|${name}|${sup}`, { name, sup }); });
-      keys.forEach((v, k) => { const x = grp(gp, k, { store, name:v.name, sup:v.sup }, it); sc.forEach(c => x.types[c.type] = (x.types[c.type]||0) + 1); });
+    if (sc.length) [...new Set(it.codes)].forEach(code => {          // MD: 사업장 + 상품코드
+      const x = grp(gp, `${store}|${code}`, { store, code, name: productName(code), sup: supOf_(it, code) }, it);
+      if (x) sc.forEach(c => x.types[c.type] = (x.types[c.type]||0) + 1);
+    });
+    const dc = [...new Set(it.claims.filter(c => c.area === "delivery").map(c => c.type))];
+    if (dc.length){                                                    // SCM: 사업장 (배송 유형 합산)
+      const x = grp(gd, store, { store }, it);
+      if (x) dc.forEach(t => x.types[t] = (x.types[t]||0) + 1);
     }
-    it.claims.filter(c => c.area === "delivery").forEach(c => grp(gd, `${store}|${c.type}`, { store, type:c.type }, it));
   });
-  // 주간·월간: 최근 30일 3건↑·2일↑ / 일간: 오늘 접수 건 중 최근 30일 안에 같은 클레임 이력(다른 날)이 있는 경우
-  const fin = g => Object.values(g).filter(x => daily ? (x.days.has(endMd) && x.days.size >= 2) : (x.items.length >= REPEAT_MIN && x.days.size >= REPEAT_MIN_DAYS))
-    .map(x => { const days = [...x.days].sort((a,b)=>vipMdKey(a)-vipMdKey(b)); const cen = Object.entries(x.centers).sort((a,b)=>b[1]-a[1])[0];
-      const prev = days.filter(d => d !== endMd);
-      return { ...x, n:x.items.length, dayList:days, last:days[days.length-1], center: cen ? cen[0] : "", storeTotal:storeTotal[x.store].size, todayN: x.items.filter(i => i.r.date === endMd).length, prevLast: prev[prev.length-1] }; })
+  const fin = g => Object.values(g).filter(x => x.items.length >= rule.min && (!rule.today || x.days.has(endMd)))
+    .map(x => { const days = [...x.days].sort((a,b) => vipMdKey(a)-vipMdKey(b)); const cen = Object.entries(x.centers).sort((a,b) => b[1]-a[1])[0];
+      const todayN = x.items.filter(i => i.r.date === endMd).length, prev = days.filter(d => d !== endMd);
+      return { ...x, n:x.items.length, dayList:days, first:days[0], last:days[days.length-1], center: cen ? cen[0] : "", todayN, prevN: x.items.length - todayN, prevLast: prev[prev.length-1] }; })
     .sort((a,b) => b.n - a.n || vipMdKey(b.last) - vipMdKey(a.last));
-  return { product: fin(gp), delivery: fin(gd), daily: !!daily, endMd };
+  out.product = fin(gp); out.delivery = fin(gd);
+  return out;
 }
-function repeatDays(x){ return x.dayList.slice(-4).map(d => dateLabel(d)).join(", ") + (x.dayList.length > 4 ? " 외" : ""); }
-function repeatWhat(x, g){ return g === "product" ? `${x.name} · ${x.sup}` : x.type; }
-function repeatDetail(x, g, daily){
-  const share = x.storeTotal ? Math.round(x.n / x.storeTotal * 100) : 0;
-  const types = g === "product" ? Object.entries(x.types).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([t,n]) => `${t} ${n}`).join(" · ") + " · " : (x.center ? `${x.center} · ` : "");
-  if (daily) return { share, text: `${types}오늘 ${x.todayN}건 · 이전 ${x.n - x.todayN}건 (최근 ${dateLabel(x.prevLast)})` };
-  return { share, text: `${types}${x.dayList.length}일에 걸쳐 (${repeatDays(x)})` };
+function repeatWhen_(x, rep){
+  if (rep.rule.today) return x.prevN ? `오늘 ${x.todayN}건 · 이전 ${x.prevN}건 (최근 ${dateLabel(x.prevLast)})` : `오늘 ${x.todayN}건`;
+  return `${x.dayList.length}일에 걸쳐 (${dateLabel(x.first)} ~ ${dateLabel(x.last)})`;
 }
-function buildRepeatStoreCardHTML(rep, endMd){
+function repeatTitle_(x, g){ return g === "product" ? `${pname_(x)} · ${x.sup}` : `배송 클레임 ${typesText(x.types)}`; }
+function repeatSub_(x, g, rep){
+  return g === "product" ? `${x.code} · ${typesText(x.types, 2)}${x.center ? ' · ' + x.center : ''} · ${repeatWhen_(x, rep)}`
+                         : `${x.center || '센터 미기재'} · ${repeatWhen_(x, rep)}`;
+}
+function ruleLabel_(rep){ return rep.rule.today ? `${dateLabel(rep.endMd)} 접수 건 포함 · 최근 ${rep.rule.days}일 ${rep.rule.min}회↑` : `${dateLabel(rep.endMd)} 기준 최근 ${rep.rule.days}일 · ${rep.rule.min}회↑`; }
+function buildRepeatStoreCardHTML(rep){
   window.__claimRepeat = rep;
-  const sec = (t, g) => {
+  const sec = (t, g, ruleTxt) => {
     const list = rep[g].slice(0, REPEAT_PER_TEAM);
-    const rows = list.map((x, i) => { const d = repeatDetail(x, g, rep.daily);
-      return `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
+    const rows = list.map((x, i) => `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
         <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
         <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
-          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatWhat(x, g))}</b>${(() => { const h = g === "product" ? codeChipsHTML(codeBreakdown(x.items, x.name)) : ""; return h ? `<div style="margin:2px 0;">${h}</div>` : '<br>'; })()}
-          <span style="font-size:12px;color:var(--ink-dim);">${esc(d.text)}${rep.daily ? '' : ` · 이 업장 전체 클레임 ${x.storeTotal}건 중 <b style="color:var(--ink);">${d.share}%</b>`}</span></div>
-        <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
-        <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`; }).join("");
-    return teamSectionHead(t, rep[g].length, "곳") + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">${rep.daily ? '오늘 접수 건 중 이전에 같은 클레임이 있었던 업장이 없습니다.' : '반복 클레임 업장이 없습니다.'}</div>`);
+          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatTitle_(x, g))}</b><br>
+          <span style="font-size:12px;color:var(--ink-dim);">${esc(repeatSub_(x, g, rep))}</span></div>
+        <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 회</span></div>
+        <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`).join("");
+    const more = rep[g].length > REPEAT_PER_TEAM ? `<div style="font-size:12px;color:var(--ink-dim);padding:6px 4px;">외 ${rep[g].length - REPEAT_PER_TEAM}곳 · Slack 리뷰 텍스트와 칸반에서 전체 확인</div>` : '';
+    return teamSectionHead(t, rep[g].length, "곳") + `<div style="font-size:11.5px;color:var(--ink-dim);padding:2px 4px 4px;">기준: ${ruleTxt}</div>` + (rows || `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">해당 사업장이 없습니다.</div>`) + more;
   };
   return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F76707;">
-    <h2>🔁 반복 클레임 업장<span class="tag">${rep.daily ? `${dateLabel(endMd)} 접수 건 중 최근 ${REPEAT_DAYS}일 안에 같은 업장·같은 상품(배송 유형) 클레임이 있었던 곳` : `${dateLabel(endMd)} 기준 최근 ${REPEAT_DAYS}일 · 같은 업장이 같은 상품(배송 유형)으로 ${REPEAT_MIN}건↑, ${REPEAT_MIN_DAYS}일 이상`}</span></h2>
-    <div style="margin-top:4px;">${sec(CLAIM_TEAMS[0], "product")}${sec(CLAIM_TEAMS[1], "delivery")}</div>
-    <div style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">상품: 상품 문제인지 업장의 보관·기대 수준 차이인지 확인 · 배송: 해당 업장 주소·출입·배송 동선 점검. 누르면 채널톡 링크가 열립니다.</div>
+    <h2>🔁 반복 클레임 사업장<span class="tag">${ruleLabel_(rep)}</span></h2>
+    <div style="margin-top:4px;">${sec(CLAIM_TEAMS[0], "product", `${rep.rule.days}일 이내 같은 사업장 · 같은 상품코드 ${rep.rule.min}회 이상`)}${sec(CLAIM_TEAMS[1], "delivery", `${rep.rule.days}일 이내 같은 사업장 배송 클레임 ${rep.rule.min}회 이상 (유형 합산)`)}</div>
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-dim);margin-top:8px;"><span>누르면 해당 상담의 채널톡 링크가 열립니다.</span>${boardLinkHTML()}</div>
   </div>`;
 }
 
-/* ---- 팀별 이슈 리뷰 텍스트 (Slack 공유용 · 향후 봇 포맷과 동일 구조) ---- */
+/* ---- 데일리 이슈 (일간): MD 당일 같은 상품코드 3회↑ / SCM 당일 배송 클레임 발생 센터 ---- */
+function detectDailyIssues(allItems, dayMd){
+  const md = {}, scm = {};
+  allItems.forEach(it => {
+    if (it.r.date !== dayMd) return;
+    const sc = it.claims.filter(c => c.area === "supplier");
+    if (sc.length) [...new Set(it.codes)].forEach(code => {
+      const x = md[code] = md[code] || { code, name: productName(code), sup: supOf_(it, code), items:[], types:{}, stores:new Set() };
+      x.items.push(it); if (it.r.store) x.stores.add(it.r.store); sc.forEach(c => x.types[c.type] = (x.types[c.type]||0) + 1);
+    });
+    const cen = it.r.center || "센터 미기재";
+    [...new Set(it.claims.filter(c => c.area === "delivery").map(c => c.type))].forEach(t => {   // SCM: 센터 + 사유
+      const x = scm[cen + "|" + t] = scm[cen + "|" + t] || { center:cen, type:t, items:[], types:{ [t]:0 }, stores:new Set() };
+      x.items.push(it); x.types[t]++; if (it.r.store) x.stores.add(it.r.store);
+    });
+  });
+  const fin = (o, min) => Object.values(o).filter(x => x.items.length >= min).map(x => ({ ...x, n:x.items.length, storeN:x.stores.size })).sort((a,b) => b.n - a.n);
+  const scmList = fin(scm, VOC_RULE.dailyScmMin), cenTot = {};
+  scmList.forEach(x => cenTot[x.center] = (cenTot[x.center]||0) + x.n);
+  scmList.sort((a,b) => cenTot[b.center] - cenTot[a.center] || a.center.localeCompare(b.center) || b.n - a.n);   // 같은 센터끼리 모아 보기
+  return { day: dayMd, md: fin(md, VOC_RULE.dailyMdMin), scm: scmList };
+}
+function buildDailyIssueCardHTML(di){
+  window.__claimDaily = di;
+  const row = (g, x, i, t) => `<div onclick="openClaimModal('daily','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
+      <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
+      <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">${g === "md"
+        ? `<b style="color:var(--ink);">${esc(pname_(x))}</b> <span style="color:var(--ink-dim);">· ${esc(x.sup)}</span><br><span style="font-size:12px;color:var(--ink-dim);">${esc(x.code)} · ${esc(typesText(x.types, 2))} · 사업장 ${x.storeN}곳</span>`
+        : `<b style="color:var(--ink);">${esc(x.center)}</b> <span style="color:var(--ink-dim);">·</span> <b style="color:${t.color};">${esc(x.type)}</b><br><span style="font-size:12px;color:var(--ink-dim);">사업장 ${x.storeN}곳</span>`}</div>
+      <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
+      <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`;
+  const sec = (t, g, list, unit, ruleTxt) => teamSectionHead(t, list.length, unit) + `<div style="font-size:11.5px;color:var(--ink-dim);padding:2px 4px 4px;">기준: ${ruleTxt}</div>` +
+    (list.length ? list.map((x, i) => row(g, x, i, t)).join("") : `<div style="font-size:12.5px;color:var(--ink-dim);padding:4px 4px 2px;">해당 없음</div>`);
+  return `<div class="card" style="margin-bottom:16px;border-top:3px solid #F0555B;">
+    <h2>📌 데일리 이슈<span class="tag">${dateLabel(di.day)} 당일 접수 기준 · 담당 부서 조치 대상</span></h2>
+    <div style="margin-top:4px;">${sec(CLAIM_TEAMS[0], "md", di.md, "개 상품", `당일 같은 상품코드 클레임 ${VOC_RULE.dailyMdMin}회 이상`)}${sec(CLAIM_TEAMS[1], "scm", di.scm, "건 (센터·사유)", `당일 배송 클레임 ${VOC_RULE.dailyScmMin}회 이상 발생 센터 · 센터와 사유별로 구분`)}</div>
+    <div style="display:flex;justify-content:flex-end;margin-top:8px;">${boardLinkHTML()}</div>
+  </div>`;
+}
+
+/* ---- 팀별 이슈 리뷰 텍스트 (Slack 공유용 · 봇/칸반과 동일 기준) ---- */
 function buildClaimReviewText(spikes, rep, ctx, teamKey){
   const strip = s => String(s||"").replace(/<[^>]+>/g, "");
-  const line = "━━━━━━━━━━━━━━━━━━";
+  const line = "━━━━━━━━━━━━━━━━━━", di = ctx.daily;
   let out = `*[클레임 VOC 이슈 리뷰] ${ctx.title}*\n`;
-  out += `_급증: ${ctx.prevLabel} 평균 대비 2배↑·3건↑ / 반복 업장: ${rep.daily ? `오늘 접수 건 중 최근 ${REPEAT_DAYS}일 내 같은 클레임 이력` : `${dateLabel(ctx.endMd)} 기준 최근 ${REPEAT_DAYS}일 ${REPEAT_MIN}건↑`}_\n`;
+  out += `_${di ? `데일리 이슈: MD 당일 같은 상품코드 ${VOC_RULE.dailyMdMin}회↑ · SCM 당일 배송 클레임 센터 / ` : ''}반복 사업장: ${ruleLabel_(rep)} / 급증: ${ctx.prevLabel} 평균 대비 2배↑·3건↑_\n`;
   CLAIM_TEAMS.filter(t => !teamKey || t.key === teamKey).forEach(t => {
-    const sp = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
     out += `${line}\n${t.icon} *${t.name}* ${t.mention}\n`;
-    out += `⚡ 급증: ${sp.length ? sp.length + "건" : "없음"}\n`;
-    sp.forEach((s, i) => { const x = spikeSentence(s, ctx.multiDay); const ct = s.level === "P" ? codeText(codeBreakdown(s.items, spikeProdName(s))) : ""; out += `   ${i+1}) ${s.label}${ct ? ` [${ct}]` : ""}${x.types ? ` — ${x.types}` : ""} / ${strip(x.base)}${strip(x.when)}\n`; });
-    if (rep[t.key]){
-      const rp = rep[t.key].slice(0, REPEAT_PER_TEAM);
-      out += `🔁 반복 업장: ${rep[t.key].length ? rep[t.key].length + "곳" : "없음"}\n`;
-      rp.forEach((x, i) => { const d = repeatDetail(x, t.key, rep.daily); const ct = t.key === "product" ? codeText(codeBreakdown(x.items, x.name)) : ""; out += `   ${i+1}) ${x.store} → ${repeatWhat(x, t.key)}${ct ? ` [${ct}]` : ""} ${x.n}건 · ${d.text}\n`; });
+    if (di && t.key === "product"){
+      out += `📌 데일리 이슈: ${di.md.length ? di.md.length + "개 상품" : "없음"}\n`;
+      di.md.forEach((x, i) => out += `   ${i+1}) ${x.code} ${pname_(x)} · ${x.sup} — ${typesText(x.types, 2)} / ${x.n}건 · 사업장 ${x.storeN}곳\n`);
     }
+    if (di && t.key === "delivery"){
+      out += `📌 데일리 이슈(센터·사유): ${di.scm.length ? di.scm.length + "건" : "없음"}\n`;
+      di.scm.forEach((x, i) => out += `   ${i+1}) ${x.center} · ${x.type} ${x.n}건 — 사업장 ${x.storeN}곳\n`);
+    }
+    if (rep[t.key]){
+      out += `🔁 반복 사업장: ${rep[t.key].length ? rep[t.key].length + "곳" : "없음"}\n`;
+      rep[t.key].forEach((x, i) => out += `   ${i+1}) ${x.store} → ${repeatTitle_(x, t.key)} ${x.n}회 · ${repeatSub_(x, t.key, rep)}\n`);
+    }
+    const sp = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
+    out += `⚡ 급증: ${sp.length ? sp.length + "건" : "없음"}\n`;
+    sp.forEach((s, i) => { const x = spikeSentence(s, ctx.multiDay); const ct = s.level === "P" ? codeText(codeBreakdown(s.items, spikeProdName(s))) : ""; out += `   ${i+1}) ${s.label}${ct ? ` [${ct}]` : ""}${x.types ? ` — ${x.types}` : ""} / ${strip(x.base)}\n`; });
   });
+  out += `${line}\n🗂 칸반 보드(조치 등록): ${CLAIM_BOARD_URL}`;
   return out.trim();
 }
 function buildClaimReviewBarHTML(spikes, rep, ctx){
   const texts = { all: buildClaimReviewText(spikes, rep, ctx) };
   CLAIM_TEAMS.forEach(t => texts[t.key] = buildClaimReviewText(spikes, rep, ctx, t.key));
   window.__claimReviewTexts = texts;
-  const cnt = t => spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM).length + (rep[t.key] ? Math.min(REPEAT_PER_TEAM, rep[t.key].length) : 0);
+  const di = ctx.daily;
+  const cnt = t => (di && t.key === "product" ? di.md.length : 0) + (di && t.key === "delivery" ? di.scm.length : 0) + (rep[t.key] ? rep[t.key].length : 0) + spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM).length;
   return `<div class="card" style="margin-bottom:16px;">
-    <h2>📣 팀별 이슈 리뷰<span class="tag">아래 급증·반복 업장을 팀별로 묶은 Slack 공유용 텍스트</span></h2>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <h2>📣 팀별 이슈 리뷰<span class="tag">데일리 이슈 · 반복 사업장 · 급증을 팀별로 묶은 Slack 공유용 텍스트</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <button onclick="copyClaimReview('all',this)" style="background:var(--accent);color:#0F1420;font-weight:700;border:none;">📋 전체 복사</button>
       ${CLAIM_TEAMS.map(t => `<button onclick="copyClaimReview('${t.key}',this)" style="border-color:${t.color};">${t.icon} ${t.team} <b style="color:${cnt(t)?'var(--bad)':'var(--ink-dim)'};">${cnt(t)}</b></button>`).join("")}
+      <span style="flex:1;"></span>${boardLinkHTML('🗂 클레임 칸반 보드 열기 ↗')}
     </div>
     <details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12.5px;color:var(--ink-dim);">미리보기</summary>
       <pre style="white-space:pre-wrap;font-size:12px;line-height:1.6;background:var(--panel-2);border-radius:8px;padding:10px 12px;margin-top:6px;">${esc(texts.all)}</pre></details>
@@ -2641,6 +2726,16 @@ function buildClaimSummaryCard(rawLog, dates, label){
         <div style="font-size:12px;color:var(--ink);margin-top:2px;">${t.length ? t.map(([k,v]) => `${esc(k)} ${v.length}`).join(" · ") : '<span style="color:var(--ink-dim);">-</span>'}</div>
       </div>`).join("")}
     </div>
+    ${(() => { // 데일리 VOC 기준 한 줄 요약 (클레임 VOC 화면 · 칸반과 같은 기준)
+      const all = rawLog.map(parseClaimRow).filter(Boolean);
+      const sorted = dates.slice().sort((a,b)=>vipMdKey(a)-vipMdKey(b)), endMd = sorted[sorted.length-1];
+      const period = dates.length === 1 ? "daily" : dates.length <= 7 ? "weekly" : "monthly";
+      const rp = detectRepeatStores(all, endMd, period), di = period === "daily" ? detectDailyIssues(all, endMd) : null;
+      const chip = (label, n, color) => `<span style="display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);border:1px solid var(--line);border-left:3px solid ${color};border-radius:8px;padding:5px 10px;font-size:12.5px;">${label} <b style="color:${n?'var(--bad)':'var(--ink-dim)'};font-size:14px;">${n}</b></span>`;
+      return `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center;">
+        ${di ? chip('📌 데일리 이슈 · MD 상품', di.md.length, CLAIM_TEAMS[0].color) + chip('📌 데일리 이슈 · SCM 센터·사유', di.scm.length, CLAIM_TEAMS[1].color) : ''}
+        ${chip('🔁 반복 사업장 · MD', rp.product.length, CLAIM_TEAMS[0].color)}${chip('🔁 반복 사업장 · SCM', rp.delivery.length, CLAIM_TEAMS[1].color)}
+        <span style="font-size:11px;color:var(--ink-dim);">반복 기준: 최근 ${rp.rule.days}일 ${rp.rule.min}회↑${rp.rule.today ? ' (당일 접수 포함)' : ''}</span></div>`; })()}
     ${(() => { const all = rawLog.map(parseClaimRow).filter(Boolean); const sp = detectClaimSpikes(all, spikeBucketsFor(rawLog, dates)); return sp.length ? `<div style="margin-top:12px;font-size:12.5px;font-weight:700;color:var(--bad);">⚡ 급증 이슈 TOP ${Math.min(3, sp.length)}</div>` + sp.slice(0,3).map(s => { const t = spikeSentence(s, dates.length > 1); const d = SPIKE_DEPT[s.area]; return `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--line);"><span style="font-size:11px;font-weight:700;color:${d.color};margin-right:6px;">${d.name}</span><b>${esc(s.label)}</b> <span style="color:var(--ink-dim);">${esc(t.types)}</span> · <span style="color:var(--bad);">▲ ${t.base}</span>${t.when}</div>`; }).join("") : ''; })()}
     <button onclick="switchToClaim()" style="margin-top:12px;">🧾 클레임 VOC 상세 보기 →</button>
   </div>`;
