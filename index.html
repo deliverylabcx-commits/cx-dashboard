@@ -2093,6 +2093,31 @@ function deltaBadge(cur, prev){
 
 // ---- 상세 모달 (유형 클릭 / 상품 클릭) ----
 function closeClaimModal(){ const m = document.getElementById("claimModal"); if (m) m.remove(); document.body.style.overflow = ""; }
+/* ---- 클레임 첨부 사진 (Vercel 서버 함수 /api/photos 경유 · 채널톡 키는 서버 환경변수에만 보관) ---- */
+function chatIdOf(url){ const m = String(url || "").match(/user[_-]?chats\/([A-Za-z0-9]+)/); return m ? m[1] : null; }
+function photoCodeGet(){ try { return sessionStorage.getItem("photoViewCode") || window.__photoCode || ""; } catch(e){ return window.__photoCode || ""; } }
+function photoCodeSet(v){ window.__photoCode = v; try { v ? sessionStorage.setItem("photoViewCode", v) : sessionStorage.removeItem("photoViewCode"); } catch(e){} }
+async function toggleClaimPhotos(chat, rowId){
+  const row = document.getElementById(rowId); if (!row) return;
+  if (row.style.display !== "none" && row.dataset.loaded){ row.style.display = "none"; return; }
+  row.style.display = ""; const cell = row.firstElementChild;
+  let code = photoCodeGet();
+  if (!code){ code = prompt("사진 열람 코드를 입력하세요 (팀 공용 코드)"); if (!code){ row.style.display = "none"; return; } photoCodeSet(code.trim()); code = code.trim(); }
+  cell.innerHTML = '<span style="color:var(--ink-dim);">사진을 불러오는 중…</span>';
+  try {
+    const r = await fetch("/api/photos?chat=" + encodeURIComponent(chat), { headers: { "x-view-code": code } });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401){ photoCodeSet(""); cell.innerHTML = '열람 코드가 올바르지 않습니다. 📷를 다시 눌러 입력해 주세요.'; return; }
+    if (!r.ok){ cell.innerHTML = esc(j.error || ("오류 " + r.status)); return; }
+    row.dataset.loaded = "1";
+    const ph = j.photos || [];
+    cell.innerHTML = ph.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:8px;">${ph.map(p => `<a href="${esc(p.url)}" target="_blank" rel="noopener"><img src="${esc(p.thumb || p.url)}" loading="lazy" alt="첨부 사진" style="height:120px;max-width:200px;object-fit:cover;border-radius:8px;border:1px solid var(--line);"></a>`).join("")}</div>
+         <div style="font-size:11px;color:var(--ink-dim);margin-top:4px;">사진 ${ph.length}장 · 누르면 원본이 새 탭에서 열립니다 · 보안을 위해 주소는 잠시 후 만료됩니다</div>`
+      : '<span style="color:var(--ink-dim);">첨부 사진이 없습니다.</span>';
+  } catch(e){ cell.innerHTML = '사진을 불러오지 못했습니다. 대시보드를 Vercel 주소에서 열었는지 확인해 주세요.'; }
+}
+
 function openClaimModal(kind, key){
   const ctx = window.__claimCtx; if (!ctx) return;
   let items, title, color;
@@ -2109,7 +2134,7 @@ function openClaimModal(kind, key){
   const prodOf = it => it.codes.map(productName).join(", ") || "-";
   const prodCell = it => it.codes.length ? it.codes.map(c => `${esc(productName(c))}<div style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--ink-dim);">${esc(c)}</div>`).join("") : "-";
   const codeRank = codeBreakdown(items).map(([c,n]) => [`${c} · ${productName(c)}`, n]);
-  const rowsHTML = (list) => list.map((it,i) => `<tr><td style="text-align:left;color:var(--ink-dim);">${i+1}</td><td style="text-align:left;white-space:nowrap;">${dateLabel(it.r.date)} ${it.r.hour}시</td><td style="text-align:left;">${esc(it.r.center||'-')}</td><td style="text-align:left;color:var(--ink);">${prodCell(it)}</td><td style="text-align:left;">${it.claims.map(c=>esc(c.type)).join(", ")}</td><td style="text-align:left;">${esc(it.supplier||'-')}</td><td>${it.r.url?`<a href="${esc(it.r.url)}" target="_blank" style="color:var(--accent);font-weight:700;">채널톡 ↗</a>`:'-'}</td></tr>`).join("");
+  const rowsHTML = (list) => list.map((it,i) => `<tr><td style="text-align:left;color:var(--ink-dim);">${i+1}</td><td style="text-align:left;white-space:nowrap;">${dateLabel(it.r.date)} ${it.r.hour}시</td><td style="text-align:left;">${esc(it.r.center||'-')}</td><td style="text-align:left;color:var(--ink);">${prodCell(it)}</td><td style="text-align:left;">${it.claims.map(c=>esc(c.type)).join(", ")}</td><td style="text-align:left;">${esc(it.supplier||'-')}</td><td style="white-space:nowrap;">${it.r.url?`<a href="${esc(it.r.url)}" target="_blank" style="color:var(--accent);font-weight:700;">채널톡 ↗</a>`:'-'}${chatIdOf(it.r.url)?` <button onclick="toggleClaimPhotos('${chatIdOf(it.r.url)}','ph-${i}')" title="첨부 사진 보기" style="padding:1px 7px;font-size:12px;margin-left:4px;">📷</button>`:''}</td></tr>${chatIdOf(it.r.url)?`<tr id="ph-${i}" style="display:none;"><td colspan="7" style="text-align:left;background:var(--panel-2);"></td></tr>`:''}`).join("");
   window.__claimModalItems = items;
   const el = document.createElement("div");
   el.id = "claimModal";
