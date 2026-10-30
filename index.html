@@ -679,6 +679,28 @@ function parseOnboardCalls(text){
   return out;
 }
 
+/* ---- 업장 특성 뱃지 (RAW 대문자 "Tags" 열): 업장 등급만 표시 · 고객 성향 태그(천사·블랙·강성 등)는 제외 ---- */
+const STORE_BADGE_RULES = [
+  { re:/^VIP_(\d)등급$/, label: m => `VIP ${m[1]}`, color:"#E8A33D" },
+  { re:/^프랜차이즈$/,     label: () => "프랜차이즈",  color:"#15AABF" },
+  // 필요 시 추가: { re:/^다점포$/, label: () => "다점포", color:"#748FFC" },
+];
+function isStoreBadgeTag(t){ return STORE_BADGE_RULES.some(b => b.re.test(t)); }
+function storeBadgesHTML(utags){
+  return String(utags || "").split(",").filter(Boolean).map(t => { const b = STORE_BADGE_RULES.find(x => x.re.test(t)); if (!b) return ""; const m = t.match(b.re);
+    return `<span style="display:inline-block;font-size:10.5px;font-weight:800;border-radius:5px;padding:1px 6px;margin-left:5px;vertical-align:1px;background:${b.color}26;color:${b.color};border:1px solid ${b.color}55;">${esc(b.label(m))}</span>`; }).join("");
+}
+function storeBadgesText(utags){
+  const l = String(utags || "").split(",").filter(Boolean).map(t => { const b = STORE_BADGE_RULES.find(x => x.re.test(t)); return b ? b.label(t.match(b.re)) : ""; }).filter(Boolean);
+  return l.length ? ` [${l.join("·")}]` : "";
+}
+// 그룹(여러 상담)에서 업장 특성: 가장 최근 상담의 Tags 기준
+function latestUtags(items){ let best = null; (items||[]).forEach(it => { if (!best || vipMdKey(it.r.date)*100 + it.r.hour > vipMdKey(best.r.date)*100 + best.r.hour) best = it; }); return best ? (best.r.utags || "") : ""; }
+function badgeSummary(items){ // 데일리 이슈용: 고유 사업장 기준 VIP·프랜차이즈 수
+  const byStore = {}; (items||[]).forEach(it => { if (it.r.store) byStore[it.r.store] = it.r.utags || byStore[it.r.store] || ""; });
+  const cnt = {}; Object.values(byStore).forEach(u => String(u).split(",").filter(Boolean).forEach(t => { const b = STORE_BADGE_RULES.find(x => x.re.test(t)); if (b){ const k = /^VIP/.test(t) ? "VIP" : b.label(t.match(b.re)); cnt[k] = (cnt[k]||0) + 1; } }));
+  return Object.entries(cnt).map(([k,n]) => `${k} ${n}`).join(" · ");
+}
 function parseRawLog(text){
   const parsed = Papa.parse(text.trim(), { skipEmptyLines: false });
   const rows = parsed.data;
@@ -731,6 +753,7 @@ function parseRawLog(text){
       missedReason: idx.missed>=0 ? (row[idx.missed]||"").trim() : "",
       medium: idx.medium>=0 ? (row[idx.medium]||"").trim() : "",
       vip: (() => { if (idx.vipTags < 0) return null; const vm = (row[idx.vipTags]||"").match(/VIP_(\d)등급/); return vm ? parseInt(vm[1]) : null; })(),
+      utags: idx.vipTags >= 0 ? (row[idx.vipTags]||"").split(",").map(t => t.trim()).filter(isStoreBadgeTag).join(",") : "",
     });
   }
   out.hasVipTags = idx.vipTags >= 0;
@@ -2338,6 +2361,7 @@ function renderClaim(data){
     <div class="card" style="margin-bottom:16px;border-top:3px solid ${CLAIM_AREA_MAP.delivery.color};"><h2>🚚 배송 클레임 · 센터 TOP 10<span class="tag">센터별 이슈 유형 건수 · 숫자를 누르면 채널톡 링크</span></h2>${delivHTML}</div>
     <div class="footer-note">
       데일리 VOC 기준(유관부서 합의 · 칸반 보드와 동일): 📌 데일리 이슈 — MD 당일 같은 상품코드 ${VOC_RULE.dailyMdMin}회↑ / SCM 당일 배송 클레임 발생 센터(센터·사유별) · 🔁 반복 사업장 — MD ${VOC_RULE.repeat.weekly.days}일 이내 같은 사업장·같은 상품코드 ${VOC_RULE.repeat.weekly.min}회↑ / SCM ${VOC_RULE.repeat.weekly.days}일 이내 같은 사업장 배송 클레임 ${VOC_RULE.repeat.weekly.min}회↑(유형 합산) · 일간은 당일 접수 건 포함 사업장, 월간은 ${VOC_RULE.repeat.monthly.days}일 기준.<br>
+      품절: 배송일이 바뀌는 품절은 「서비스 이용문의/품절」 태그로 잡혀 상품 클레임에서 제외됩니다(메인 대시보드 「품절 문의」로 집계). 「공급사클레임/품절」 태그는 지금처럼 상품 클레임에 포함됩니다.<br>
       분류: CX Play Book 「채널톡_태그관리」 기준 — 공급사 클레임(공급사클레임·품질불량), 배송 클레임(배송클레임·FC배송), 서비스 클레임(서비스이용클레임), 기타(유관부서 전달).<br>
       유형은 tags 3depth를 단순화했습니다(품질불량의 환불·퀵 등 처리방안, "(배송기사)"·"(보냉불량)" 꼬리표 제외 · 분리/익일배송→미배송, 정정배송→오배송). 한 상담에 여러 유형이 있으면 유형별로 각각 셉니다.<br>
       상품은 상담 설명의 HERO 코드를 상품 매칭 시트(히어로코드·유통사명·상품명)와 매칭하고, 같은 상품명·같은 공급사는 하나로 묶습니다. 증감은 ${prevLabel} 대비, 추세선은 최근 ${buckets.length}개 ${claimPeriod==='daily'?'영업일':claimPeriod==='weekly'?'주':'월'}입니다.
@@ -2352,7 +2376,8 @@ const ISSUE_GROUPS = [
   { name:"배송 클레임",       team:"delivery", color:"#4C6EF5" },
   { name:"서비스·기타 클레임", team:"other",    color:"#BE4BDB" },
   { name:"배송 문의",         tag:"배송문의",     color:"#748FFC", inq:true },
-  { name:"서비스 이용 문의",   tag:"서비스이용문의", color:"#20C997", inq:true },
+  { name:"서비스 이용 문의",   tag:"서비스이용문의", exclude3:"품절", color:"#20C997", inq:true },
+  { name:"품절 문의",          tag3:"서비스이용문의/품절", color:"#F76707", inq:true },  // 품절로 배송일 변경 (이사님 회의: 서비스 이용문의/품절 태그)
   { name:"주문·결제 문의",     tag:["주문결제","오주문단순변심"], color:"#8B96AD", inq:true },
 ];
 const ISSUE_COLOR = Object.fromEntries(ISSUE_GROUPS.map(g => [g.name, g.color]));
@@ -2365,8 +2390,9 @@ function rawIssueSection(rawLog){
     const add = g => sec[g.name][r.date] = (sec[g.name][r.date] || 0) + 1;
     const it = parseClaimRow(r);
     if (it) ISSUE_GROUPS.filter(g => g.team).forEach(g => { const t = CLAIM_TEAMS.find(x => x.key === g.team); if (it.claims.some(c => t.areas.includes(c.area))) add(g); });
-    const t2 = new Set((r.tags || "").split(",").map(t => (t.trim().split("/")[1] || "")));
-    ISSUE_GROUPS.filter(g => g.tag).forEach(g => { if ([].concat(g.tag).some(t => t2.has(t))) add(g); });
+    const parts = (r.tags || "").split(",").map(t => t.trim().split("/").map(x => x.trim())).filter(p => p.length >= 2);
+    ISSUE_GROUPS.filter(g => g.tag).forEach(g => { if (parts.some(p => [].concat(g.tag).includes(p[1]) && !(g.exclude3 && p[2] === g.exclude3))) add(g); });
+    ISSUE_GROUPS.filter(g => g.tag3).forEach(g => { if (parts.some(p => p[1] + "/" + (p[2]||"") === g.tag3)) add(g); });
   });
   __issueCache = { src: rawLog, len: rawLog.length, sec };
   return sec;
@@ -2588,7 +2614,7 @@ function buildRepeatStoreCardHTML(rep){
     const rows = list.map((x, i) => `<div onclick="openClaimModal('repeat','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
         <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
         <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">
-          <b style="color:var(--ink);">${esc(x.store)}</b> <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatTitle_(x, g))}</b><br>
+          <b style="color:var(--ink);">${esc(x.store)}</b>${storeBadgesHTML(latestUtags(x.items))} <span style="color:var(--ink-dim);">→</span> <b style="color:${t.color};">${esc(repeatTitle_(x, g))}</b><br>
           <span style="font-size:12px;color:var(--ink-dim);">${esc(repeatSub_(x, g, rep))}</span></div>
         <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 회</span></div>
         <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`).join("");
@@ -2629,8 +2655,8 @@ function buildDailyIssueCardHTML(di){
   const row = (g, x, i, t) => `<div onclick="openClaimModal('daily','${g}:${i}')" style="display:flex;gap:12px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer;">
       <b style="width:20px;color:${i<3?t.color:'var(--ink-dim)'};">${i+1}</b>
       <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.55;">${g === "md"
-        ? `<b style="color:var(--ink);">${esc(pname_(x))}</b> <span style="color:var(--ink-dim);">· ${esc(x.sup)}</span><br><span style="font-size:12px;color:var(--ink-dim);">${esc(x.code)} · ${esc(typesText(x.types, 2))} · 사업장 ${x.storeN}곳</span>`
-        : `<b style="color:var(--ink);">${esc(x.center)}</b> <span style="color:var(--ink-dim);">·</span> <b style="color:${t.color};">${esc(x.type)}</b><br><span style="font-size:12px;color:var(--ink-dim);">사업장 ${x.storeN}곳</span>`}</div>
+        ? `<b style="color:var(--ink);">${esc(pname_(x))}</b> <span style="color:var(--ink-dim);">· ${esc(x.sup)}</span><br><span style="font-size:12px;color:var(--ink-dim);">${esc(x.code)} · ${esc(typesText(x.types, 2))} · 사업장 ${x.storeN}곳${badgeSummary(x.items) ? ' (' + esc(badgeSummary(x.items)) + ')' : ''}</span>`
+        : `<b style="color:var(--ink);">${esc(x.center)}</b> <span style="color:var(--ink-dim);">·</span> <b style="color:${t.color};">${esc(x.type)}</b><br><span style="font-size:12px;color:var(--ink-dim);">사업장 ${x.storeN}곳${badgeSummary(x.items) ? ' (' + esc(badgeSummary(x.items)) + ')' : ''}</span>`}</div>
       <div style="font-size:18px;font-weight:800;">${x.n}<span style="font-size:12px;color:var(--ink-dim);font-weight:500;"> 건</span></div>
       <span style="color:var(--accent);font-size:12px;flex-shrink:0;">링크 ›</span></div>`;
   const sec = (t, g, list, unit, ruleTxt) => teamSectionHead(t, list.length, unit) + `<div style="font-size:11.5px;color:var(--ink-dim);padding:2px 4px 4px;">기준: ${ruleTxt}</div>` +
@@ -2652,15 +2678,15 @@ function buildClaimReviewText(spikes, rep, ctx, teamKey){
     out += `${line}\n${t.icon} *${t.name}* ${t.mention}\n`;
     if (di && t.key === "product"){
       out += `📌 데일리 이슈: ${di.md.length ? di.md.length + "개 상품" : "없음"}\n`;
-      di.md.forEach((x, i) => out += `   ${i+1}) ${x.code} ${pname_(x)} · ${x.sup} — ${typesText(x.types, 2)} / ${x.n}건 · 사업장 ${x.storeN}곳\n`);
+      di.md.forEach((x, i) => out += `   ${i+1}) ${x.code} ${pname_(x)} · ${x.sup} — ${typesText(x.types, 2)} / ${x.n}건 · 사업장 ${x.storeN}곳${badgeSummary(x.items) ? ' (' + badgeSummary(x.items) + ')' : ''}\n`);
     }
     if (di && t.key === "delivery"){
       out += `📌 데일리 이슈(센터·사유): ${di.scm.length ? di.scm.length + "건" : "없음"}\n`;
-      di.scm.forEach((x, i) => out += `   ${i+1}) ${x.center} · ${x.type} ${x.n}건 — 사업장 ${x.storeN}곳\n`);
+      di.scm.forEach((x, i) => out += `   ${i+1}) ${x.center} · ${x.type} ${x.n}건 — 사업장 ${x.storeN}곳${badgeSummary(x.items) ? ' (' + badgeSummary(x.items) + ')' : ''}\n`);
     }
     if (rep[t.key]){
       out += `🔁 반복 사업장: ${rep[t.key].length ? rep[t.key].length + "곳" : "없음"}\n`;
-      rep[t.key].forEach((x, i) => out += `   ${i+1}) ${x.store} → ${repeatTitle_(x, t.key)} ${x.n}회 · ${repeatSub_(x, t.key, rep)}\n`);
+      rep[t.key].forEach((x, i) => out += `   ${i+1}) ${x.store}${storeBadgesText(latestUtags(x.items))} → ${repeatTitle_(x, t.key)} ${x.n}회 · ${repeatSub_(x, t.key, rep)}\n`);
     }
     const sp = spikes.filter(s => t.areas.includes(s.area)).slice(0, SPIKE_PER_TEAM);
     out += `⚡ 급증: ${sp.length ? sp.length + "건" : "없음"}\n`;
@@ -5365,7 +5391,7 @@ function updateStatusLabel(){
 }
 function startCountdown(){ updateStatusLabel(); } // (구 카운트다운) - 렌더 때 상태 문구만 갱신
 function sigOf(str){ let h = 0; for (let i = 0; i < str.length; i++){ h = (h * 31 + str.charCodeAt(i)) | 0; } return str.length + ":" + h; }
-function rawSigOf(rawLog){ return sigOf(rawLog.map(r => r.date + r.hour + r.agent + r.state + r.vip).join("|")); }
+function rawSigOf(rawLog){ return sigOf(rawLog.map(r => r.date + r.hour + r.agent + r.state + r.vip + (r.utags||"")).join("|")); }
 // 백그라운드 갱신: 스크롤 위치 유지 + 그래프 애니메이션 없이 조용히 교체
 function quietRender(){
   if (!lastLoadedData) return;
@@ -5426,7 +5452,7 @@ async function refreshRawLog(manual){
     if (manual || sig !== rawSig){
       rawSig = sig; lastChangedAt = new Date();
       if (lastLoadedData){ lastLoadedData.rawLog = rawLog; manual ? render(lastLoadedData) : quietRender(); }
-      cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
+      cacheSet("raw_v2", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags });
     }
     return rawLog;
   } finally { rawRefreshing = false; updateStatusLabel(); }
@@ -5437,7 +5463,7 @@ async function initialLoad(){
   const rawPromise = loadRawLog();
   const mainPromise = loadMainData();
   // 2) 직전 방문 데이터가 있으면 먼저 화면에 표시
-  const [cMain, cRaw] = await Promise.all([cacheGet("main"), cacheGet("raw")]);
+  const [cMain, cRaw] = await Promise.all([cacheGet("main"), cacheGet("raw_v2")]);
   if (cMain && !lastLoadedData){
     const rl = cRaw && cRaw.rows ? cRaw.rows : [];
     if (cRaw) rl.hasVipTags = cRaw.hasVipTags;
@@ -5461,7 +5487,7 @@ async function initialLoad(){
     const sig = rawSigOf(rawLog);
     const prevSig = lastLoadedData.rawLog.length ? rawSigOf(lastLoadedData.rawLog) : null;
     rawSig = sig;
-    if (sig !== prevSig){ lastLoadedData.rawLog = rawLog; quietRender(); cacheSet("raw", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags }); }
+    if (sig !== prevSig){ lastLoadedData.rawLog = rawLog; quietRender(); cacheSet("raw_v2", { rows: rawLog.slice(), hasVipTags: rawLog.hasVipTags }); }
   }
   updateStatusLabel();
   // 5) 주기 확인: 창이 보일 때만 (백그라운드 탭에서는 쉬고, 다시 볼 때 오래됐으면 1회 확인)
